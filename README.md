@@ -66,10 +66,10 @@ print(f"Prediction: {result['prediction']} (Confidence: {result['confidence']:.1
 
 ## 🧠 Project Overview
 
-ParaDetect leverages advanced transformer architectures to classify text as either human-written or AI-generated with **99.31% accuracy**. The project utilizes Microsoft's DeBERTa-v3-Large model, fine-tuned using Parameter-Efficient Fine-Tuning (PEFT) with LoRA adapters to achieve superior performance while maintaining computational efficiency.
+ParaDetect leverages advanced transformer architectures to classify text as either human-written or AI-generated with **99% accuracy**. The project utilizes Microsoft's DeBERTa-v3-Large model, fine-tuned using Parameter-Efficient Fine-Tuning (PEFT) with LoRA adapters to achieve superior performance while maintaining computational efficiency.
 
 ### 🎯 Key Features
-- **High Accuracy**: Achieves 99.31% accuracy on test datasets
+- **High Accuracy**: Achieves 99% accuracy on test datasets
 - **Efficient Training**: Uses LoRA for parameter-efficient fine-tuning (~6% trainable parameters)
 - **Interactive Demo**: Gradio-based web interface for real-time text analysis
 - **Pre-trained Models**: Available on HuggingFace Hub for immediate use
@@ -81,7 +81,7 @@ ParaDetect leverages advanced transformer architectures to classify text as eith
 ### Pre-trained Model
 - **Model Repository**: [`srikanthgali/paradetect-deberta-v3-lora`](https://huggingface.co/srikanthgali/paradetect-deberta-v3-lora)
 - **Base Model**: microsoft/deberta-v3-large with LoRA adapters
-- **Performance**: 99.31% accuracy, 99.31% F1-score
+- **Performance**: 99% accuracy, 99% F1-score
 - **Ready for inference**: No training required
 
 ### Dataset
@@ -94,10 +94,8 @@ ParaDetect leverages advanced transformer architectures to classify text as eith
 
 ```
 ParaDetect/
-├── 📊 data/
-│   ├── AI_Text_Detection_Pile_cleaned.csv         # Full processed dataset
-│   ├── AI_Text_Detection_Pile_sampled_50k.csv     # 50K sample for quick experiments
-│   └── AI_Text_Detection_Pile_metadata.txt        # Dataset metadata
+├── 📊 data/│ 
+│   ├── AI_Text_Detection_Pile_sampled_50k.csv     # 50K sample for quick experiments│   
 ├── 📓 notebooks/
 │   ├── 01_EDA_and_Data_Prepration.ipynb          # Exploratory Data Analysis
 │   ├── 02_FineTuning_EncoderOnly_TransformerModel_Evalution.ipynb  # Model Training
@@ -153,7 +151,7 @@ SAMPLE_SIZES = {
     'quick_test': 1000,      # Rapid prototyping (~5 min training)
     'development': 10000,    # Development work (~30 min training)
     'local_sample': 50000,   # Local sample dataset (~90 min training)
-    'production': 100000,    # Production training (~180 min training)
+    'production': 100000,    # Production training (~60 min training)
     'full': 721626          # Complete dataset (~6+ hours training)
 }
 ```
@@ -164,9 +162,9 @@ SAMPLE_SIZES = {
 - **Token Distribution**: Supports up to 512 tokens (DeBERTa-v3 limit)
 - **Quality Control**: Comprehensive data cleaning and preprocessing
 
-| Metric | Human Text | AI Text | Local Sample |
+| Metric | Human Text | AI Text | Test Dataset |
 |--------|------------|---------|--------------|
-| **Samples** | 360,813 | 360,813 | 25,000 each |
+| **Samples** | 360,813 | 360,813 | 7,482 / 7,518 |
 | **Avg Length** | ~150 words | ~140 words | ~145 words |
 | **Token Range** | 10-512 tokens | 15-512 tokens | 10-512 tokens |
 
@@ -174,7 +172,7 @@ SAMPLE_SIZES = {
 
 ### Architecture Details
 - **Base Model**: [`microsoft/deberta-v3-large`](https://huggingface.co/microsoft/deberta-v3-large)
-- **Parameters**: ~435M total, ~28M trainable with LoRA
+- **Parameters**: ~435M total, ~28.7M trainable with LoRA (6.20% trainable)
 - **Fine-tuning Method**: LoRA (Low-Rank Adaptation)
 - **Task Type**: Binary sequence classification
 - **Pre-trained Model**: Available on [`HuggingFace Hub`](https://huggingface.co/srikanthgali/paradetect-deberta-v3-lora)
@@ -203,28 +201,28 @@ SAMPLE_SIZES = {
 
 | Metric | Score | Description |
 |--------|-------|-------------|
-| **Accuracy** | 99.31% | Overall classification accuracy |
-| **Precision** | 99.31% | Weighted average precision |
-| **Recall** | 99.31% | Weighted average recall |
-| **F1-Score** | 99.31% | Weighted average F1-score |
+| **Accuracy** | 99% | Overall classification accuracy |
+| **Precision** | 99% | Weighted average precision |
+| **Recall** | 99% | Weighted average recall |
+| **F1-Score** | 99% | Weighted average F1-score |
 
 ### Class-wise Performance
 
 | Class | Precision | Recall | F1-Score | Support |
 |-------|-----------|--------|----------|---------|
-| **Human (0)** | 99.72% | 98.89% | 99.30% | 7,500 |
-| **AI (1)** | 98.91% | 99.72% | 99.31% | 7,500 |
+| **Human (0)** | 100% | 99% | 99% | 7,482 |
+| **AI (1)** | 99% | 100% | 99% | 7,518 |
 
 ### Training Efficiency
-- **Trainable Parameters**: 6% of total model parameters
-- **Training Time**: ~120-180 minutes on NVIDIA A100
+- **Trainable Parameters**: 6.20% of total model parameters (28.7M / 463.5M)
+- **Training Time**: ~57 minutes on NVIDIA A100 (4000 steps)
 - **Memory Usage**: Significantly reduced with LoRA
 - **Early Stopping**: Patience of 5 steps to prevent overfitting
 
 ## 🔍 Results & Interpretation
 
 ### Key Findings
-1. **Exceptional Performance**: Achieved near-perfect classification accuracy (99.31%)
+1. **Exceptional Performance**: Achieved near-perfect classification accuracy (99%)
 2. **Balanced Predictions**: No significant bias toward either class
 3. **Efficient Training**: LoRA enabled training large models with limited resources
 4. **Robust Generalization**: Consistent performance across validation and test sets
@@ -358,7 +356,7 @@ print(f"Full dataset: {len(dataset['train']):,} samples")
 | Sample Size | Training Time | Memory Usage | Accuracy | Dataset Source |
 |-------------|---------------|--------------|----------|----------------|
 | **50K samples** | ~90 minutes | 12GB | ~99% | Local sample file |
-| **100K samples** | ~180 minutes | 15GB | 99.31% | HuggingFace subset |
+| **100K samples** | ~57 minutes | 15GB | 99% | HuggingFace subset |
 | **Full dataset** | ~6+ hours | 20GB+ | 99%+ | HuggingFace full |
 
 ### Key Dependencies
