@@ -18,3 +18,12 @@ tf-keras
 accelerate
 tensorboard
 gradio
+python-box
+pytest
+fastapi
+uvicorn
+jinja2
+ensure
+boto3
+mypy-boto3-s3
+-e .
