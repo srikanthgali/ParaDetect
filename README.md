@@ -54,14 +54,14 @@ print(f"Prediction: {result['prediction']} (Confidence: {result['confidence']:.1
 
 ```python
 # Clone repository
-!git clone https://github.com/srikanthgali/ParaDetect.git
-%cd ParaDetect
+!git clone https://github.com/srikanthgali/para-detect.git
+%cd para-detect
 
 # Install dependencies
 !pip install -q transformers torch peft gradio accelerate
 
 # Run the interactive demo
-# Open: notebooks/03_ParaDetect_Gradio_Demo_for_AI_vs_Human_Text_Detection.ipynb
+# Open: notebooks/03_ParaDetect_Gradio_Demo.ipynb
 ```
 
 ## 🧠 Project Overview
@@ -75,6 +75,7 @@ ParaDetect leverages advanced transformer architectures to classify text as eith
 - **Pre-trained Models**: Available on HuggingFace Hub for immediate use
 - **Sample Dataset**: Includes 50K sample dataset for quick experimentation
 - **Production Ready**: Optimized for deployment with proper model checkpointing
+- **MLOps Pipeline**: Complete ML pipeline with components, monitoring, and deployment
 
 ## 🤗 HuggingFace Hub Resources
 
@@ -87,25 +88,140 @@ ParaDetect leverages advanced transformer architectures to classify text as eith
 ### Dataset
 - **Dataset Repository**: [`srikanthgali/ai-text-detection-pile-cleaned`](https://huggingface.co/datasets/srikanthgali/ai-text-detection-pile-cleaned)
 - **Full Dataset**: 721,626 samples (cleaned and processed)
-- **Local Sample**: 50K samples available in `data/AI_Text_Detection_Pile_sampled_50k.csv`
+- **Local Sample**: 50K samples available in `data/processed/AI_Text_Detection_Pile_sampled_50k.csv`
 - **Format**: Balanced binary classification dataset
 
 ## 📁 Project Structure
 
 ```
-ParaDetect/
-├── 📊 data/│ 
-│   ├── AI_Text_Detection_Pile_sampled_50k.csv     # 50K sample for quick experiments│   
-├── 📓 notebooks/
-│   ├── 01_EDA_and_Data_Prepration.ipynb          # Exploratory Data Analysis
-│   ├── 02_FineTuning_EncoderOnly_TransformerModel_Evalution.ipynb  # Model Training
-│   └── 03_ParaDetect_Gradio_Demo_for_AI_vs_Human_Text_Detection.ipynb  # Demo Interface
-├── 🤖 models/                                     # Not saved here
-├── 🚀 app/                                        # Application components (future)
-├── 🧩 components/                                 # Reusable components (future)
-├── 📝 src/                                        # Source code (future)
-├── requirements.txt                               # Dependencies
-└── README.md                                      # Project documentation
+para-detect/
+├── 📋 CHANGELOG.md                                # Version history and updates
+├── 📄 LICENSE                                     # MIT License
+├── 🔨 Makefile                                    # Build and deployment automation
+├── 📖 README.md                                   # Project documentation
+├── 📦 requirements.txt                            # Python dependencies
+├── ⚙️ setup.py                                    # Package installation setup
+├── 🏗️ template.py                                # Project structure generator
+│
+├── 🌐 api/                                        # FastAPI application
+│   ├── __init__.py
+│   ├── main.py                                    # API entry point
+│   ├── middleware/                                # API middleware
+│   │   ├── __init__.py
+│   │   ├── auth.py                                # Authentication middleware
+│   │   ├── logging.py                             # Request logging
+│   │   └── rate_limiting.py                       # Rate limiting
+│   └── routes/                                    # API endpoints
+│       ├── __init__.py
+│       ├── health.py                              # Health checks
+│       ├── monitoring.py                          # Monitoring endpoints
+│       └── prediction.py                          # Prediction endpoints
+│
+├── 📊 data/                                       # Data storage
+│   ├── interim/                                   # Intermediate processed data
+│   ├── processed/                                 # Final processed data
+│   │   └── AI_Text_Detection_Pile_sampled_50k.csv # 50K sample dataset
+│   └── raw/                                       # Raw data files
+│
+├── ⚙️ configs/                                    # Configuration files
+│   ├── __init__.py
+│   ├── config.yaml                                # Main configuration
+│   ├── deployment/                                # Deployment configs
+│   │   ├── aws_config.yaml                        # AWS deployment settings
+│   │   ├── colab_config.yaml                      # Google Colab settings
+│   │   └── local_config.yaml                      # Local development settings
+│   └── model_configs/                             # Model configurations
+│       ├── deberta_config.yaml                    # DeBERTa model config
+│       └── training_config.yaml                   # Training parameters
+│
+├── 🐳 docker/                                     # Docker containerization
+│   ├── docker-compose.yml                         # Multi-container setup
+│   ├── Dockerfile                                 # Main application container
+│   ├── Dockerfile.inference                       # Inference-only container
+│   └── Dockerfile.training                        # Training environment
+│
+├── 📚 docs/                                       # Documentation
+│   ├── architecture.md                            # System architecture
+│   ├── components.md                              # Component documentation
+│   ├── deployment.md                              # Deployment guide
+│   ├── overview.md                                # Project overview
+│   ├── pipelines.md                               # Pipeline documentation
+│   └── troubleshooting.md                         # Common issues and solutions
+│
+├── 📓 notebooks/                                  # Jupyter notebooks
+│   ├── 01_EDA_and_Data_Preparation.ipynb         # Exploratory Data Analysis
+│   ├── 02_Model_Training_and_Evaluation.ipynb    # Model Training
+│   ├── 03_ParaDetect_Gradio_Demo.ipynb           # Interactive Demo
+│   └── 04_Pipeline_Testing.ipynb                 # Pipeline validation
+│
+├── 🎯 artifacts/                                  # Training artifacts
+│   ├── logs/                                      # Training and application logs
+│   ├── metrics/                                   # Performance metrics
+│   ├── models/                                    # Saved model checkpoints
+│   └── reports/                                   # Generated reports
+│
+├── 📦 src/                                        # Source code
+│   ├── __init__.py
+│   └── para_detect/                               # Main package
+│       ├── __init__.py
+│       ├── core/                                  # Core functionality
+│       │   ├── __init__.py
+│       │   ├── base.py                            # Base classes
+│       │   ├── config_manager.py                  # Configuration management
+│       │   ├── exceptions.py                      # Custom exceptions
+│       │   └── logger.py                          # Logging utilities
+│       ├── components/                            # ML pipeline components
+│       │   ├── __init__.py
+│       │   ├── data_ingestion.py                  # Data loading
+│       │   ├── data_preprocessing.py              # Data preprocessing
+│       │   ├── data_validation.py                 # Data quality checks
+│       │   ├── feature_engineering.py             # Feature creation
+│       │   ├── model_deployment.py                # Model deployment
+│       │   ├── model_evaluation.py                # Model evaluation
+│       │   ├── model_registration.py              # Model registry
+│       │   ├── model_training.py                  # Model training
+│       │   ├── model_validation.py                # Model validation
+│       │   └── monitoring.py                      # Model monitoring
+│       ├── pipelines/                             # ML pipelines
+│       │   ├── __init__.py
+│       │   ├── batch_prediction_pipeline.py       # Batch inference
+│       │   ├── deployment_pipeline.py             # Deployment pipeline
+│       │   ├── inference_pipeline.py              # Real-time inference
+│       │   ├── retraining_pipeline.py             # Model retraining
+│       │   └── training_pipeline.py               # Training pipeline
+│       └── utils/                                 # Utility functions
+│           ├── __init__.py
+│           ├── data_utils.py                      # Data utilities
+│           ├── helpers.py                         # Helper functions
+│           ├── model_utils.py                     # Model utilities
+│           └── validators.py                      # Validation functions
+│
+├── 🚀 scripts/                                    # Deployment and automation scripts
+│   ├── deploy_model.py                            # Model deployment script
+│   ├── run_inference_pipeline.py                  # Inference pipeline runner
+│   ├── run_training_pipeline.py                   # Training pipeline runner
+│   ├── setup_environment.py                       # Environment setup
+│   └── aws/                                       # AWS-specific scripts
+│       ├── cleanup_resources.py                   # Resource cleanup
+│       ├── create_sagemaker_endpoint.py           # SageMaker deployment
+│       ├── ecs_deploy.py                          # ECS deployment
+│       └── lambda_deploy.py                       # Lambda deployment
+│
+├── 🧪 tests/                                      # Test suite
+│   ├── __init__.py
+│   ├── fixtures/                                  # Test data and mocks
+│   │   ├── mock_responses.json                    # Mock API responses
+│   │   └── sample_data.json                       # Sample test data
+│   ├── integration/                               # Integration tests
+│   │   ├── test_api_endpoints.py                  # API testing
+│   │   └── test_full_pipeline.py                  # End-to-end tests
+│   └── unit/                                      # Unit tests
+│       ├── test_components.py                     # Component tests
+│       ├── test_pipelines.py                      # Pipeline tests
+│       └── test_utils.py                          # Utility tests
+│
+└── 🎨 assets/                                     # Static assets
+    └── demo.gif                                   # Demo animation
 ```
 
 ## 📊 Dataset & Exploratory Data Analysis
@@ -113,7 +229,7 @@ ParaDetect/
 ### Dataset Overview
 - **Source**: [`artem9k/ai-text-detection-pile`](https://huggingface.co/datasets/artem9k/ai-text-detection-pile) from Hugging Face
 - **Full Dataset**: 721,626 samples (available on HuggingFace Hub)
-- **Local Sample**: 50,000 samples in `data/AI_Text_Detection_Pile_sampled_50k.csv`
+- **Local Sample**: 50,000 samples in `data/processed/AI_Text_Detection_Pile_sampled_50k.csv`
 - **Training Sample**: 100,000 samples (subset for efficient training)
 - **Classes**: Binary classification (Human: 0, AI: 1)
 - **Features**: Text content with corresponding labels
@@ -124,7 +240,7 @@ ParaDetect/
 ```python
 # Load the local 50K sample dataset
 import pandas as pd
-df = pd.read_csv('data/AI_Text_Detection_Pile_sampled_50k.csv')
+df = pd.read_csv('data/processed/AI_Text_Detection_Pile_sampled_50k.csv')
 print(f"Sample dataset size: {len(df):,} samples")
 ```
 
@@ -253,14 +369,14 @@ The project includes a professional Gradio-based web interface for real-time tex
 
 ```python
 # Quick start with pre-trained model
-!git clone https://github.com/srikanthgali/ParaDetect.git
-%cd ParaDetect
+!git clone https://github.com/srikanthgali/para-detect.git
+%cd para-detect
 
 # Install dependencies
 !pip install -q transformers torch peft gradio accelerate
 
 # Run the demo notebook
-# Open: notebooks/03_ParaDetect_Gradio_Demo_for_AI_vs_Human_Text_Detection.ipynb
+# Open: notebooks/03_ParaDetect_Gradio_Demo.ipynb
 ```
 
 #### Demo Features
@@ -300,8 +416,8 @@ model = PeftModel.from_pretrained(base_model, "srikanthgali/paradetect-deberta-v
 
 ```bash
 # Clone repository
-!git clone https://github.com/srikanthgali/ParaDetect.git
-%cd ParaDetect
+!git clone https://github.com/srikanthgali/para-detect.git
+%cd para-detect
 
 # Install dependencies
 !pip install -q torch transformers datasets accelerate evaluate
@@ -309,21 +425,21 @@ model = PeftModel.from_pretrained(base_model, "srikanthgali/paradetect-deberta-v
 
 # Choose your dataset size
 # Option 1: Use local 50K sample (fastest)
-df = pd.read_csv('data/AI_Text_Detection_Pile_sampled_50k.csv')
+df = pd.read_csv('data/processed/AI_Text_Detection_Pile_sampled_50k.csv')
 
 # Option 2: Load full dataset from HuggingFace
 dataset = load_dataset("srikanthgali/ai-text-detection-pile-cleaned")
 
 # Run training notebook
-# Open: notebooks/02_FineTuning_EncoderOnly_TransformerModel_Evalution.ipynb
+# Open: notebooks/02_Model_Training_and_Evaluation.ipynb
 ```
 
 #### Option C: Local Setup
 
 ```bash
 # Clone repository
-git clone https://github.com/srikanthgali/ParaDetect.git
-cd ParaDetect
+git clone https://github.com/srikanthgali/para-detect.git
+cd para-detect
 
 # Create virtual environment
 python -m venv venv
@@ -341,7 +457,7 @@ jupyter notebook
 ```python
 # Using the 50K sample dataset
 import pandas as pd
-df = pd.read_csv('data/AI_Text_Detection_Pile_sampled_50k.csv')
+df = pd.read_csv('data/processed/AI_Text_Detection_Pile_sampled_50k.csv')
 print(f"Sample dataset: {len(df):,} samples")
 print(f"Classes: {df['generated'].value_counts()}")
 
@@ -412,7 +528,7 @@ If you use this project or model in your research, please cite:
   title={ParaDetect: AI vs Human Text Detection with DeBERTa-v3-Large},
   author={Srikanth Gali},
   year={2025},
-  url={https://github.com/srikanthgali/ParaDetect},
+  url={https://github.com/srikanthgali/para-detect},
   note={Fine-tuned using LoRA for efficient parameter adaptation}
 }
 ```
