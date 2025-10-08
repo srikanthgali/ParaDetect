@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 *$py.class
-.DS_Store
 
 # C extensions
 *.so
@@ -239,3 +238,5 @@ credentials.json
 # Project specific
 # Uncomment if you want to ignore specific large files
 # assets/demo.gif
+data/.DS_Store
+*.DS_Store
