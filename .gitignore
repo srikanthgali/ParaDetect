@@ -184,11 +184,8 @@ models/
 *.pickle
 
 # Data files (large datasets)
-data/AI_Text_Detection_Pile_cleaned.csv
 data/*_metadata.txt
 data/large_datasets/
-data/processed/
-data/raw/
 
 # Logs and outputs
 logs/
