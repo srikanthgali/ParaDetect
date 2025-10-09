@@ -1,0 +1,52 @@
+project:
+  name: "ParaDetect"
+  version: "1.0.0"
+  environment: "development"  # development, staging, production
+
+data:
+  raw_data_dir: "data/raw/"
+  processed_data_dir: "data/processed/"
+  interim_data_dir: "data/interim/"
+
+logging:
+  level: INFO
+  format: '%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s'
+  log_dir: artifacts/logs/
+
+  # Different log levels for different components
+  loggers:
+    para_detect.training:
+      level: DEBUG
+      handlers: [file, console]
+    para_detect.inference:
+      level: INFO
+      handlers: [file, console]
+    para_detect.api:
+      level: INFO
+      handlers: [file, console, error_file]
+
+  # Log rotation settings
+  rotation:
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
+
+  # Structured logging for production
+  structured: false
+  json_format: false
+
+# Environment-specific overrides
+environments:
+  development:
+    logging:
+      level: DEBUG
+      structured: false
+
+  production:
+    logging:
+      level: INFO
+      structured: true
+      json_format: true
+
+monitoring:
+  enable_metrics: true
+  log_sampling_rate: 1.0  # 100% in dev, lower in prod

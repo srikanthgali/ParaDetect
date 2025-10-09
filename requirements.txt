@@ -26,4 +26,8 @@ jinja2
 ensure
 boto3
 mypy-boto3-s3
+structlog
+python-json-logger
+pyyaml
+ensure
 -e .
