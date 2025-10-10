@@ -186,6 +186,7 @@ models/
 # Data files (large datasets)
 data/*_metadata.txt
 data/large_datasets/
+data/raw/*
 
 # Logs and outputs
 logs/

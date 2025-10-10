@@ -1,0 +1,20 @@
+{
+  "shape": [
+    548,
+    3
+  ],
+  "columns": [
+    "text",
+    "generated",
+    "source"
+  ],
+  "class_distribution": {
+    "1": 274,
+    "0": 274
+  },
+  "text_length_stats": {
+    "min": 66,
+    "max": 4960,
+    "mean": 1838.558394160584
+  }
+}

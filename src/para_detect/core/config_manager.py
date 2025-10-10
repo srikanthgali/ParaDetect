@@ -1,11 +1,19 @@
 import os
 from box import ConfigBox
-from para_detect.entities.logger_config import LoggerConfig, ComponentLoggerConfig
+from para_detect.entities import (
+    LoggerConfig,
+    ComponentLoggerConfig,
+    DataIngestionConfig,
+    DataPreprocessingConfig,
+    DataValidationConfig,
+    PipelineConfig,
+)
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from para_detect.constants import *
+from para_detect.core.exceptions import ConfigurationError
 from para_detect.utils.helpers import read_yaml
 
 
@@ -51,8 +59,6 @@ class ConfigurationManager:
             # Load deployment configs based on environment
             if self.environment == "production":
                 self.deployment_config = read_yaml(AWS_CONFIG_FILE_PATH)
-            elif self.environment == "development":
-                self.deployment_config = read_yaml(LOCAL_CONFIG_FILE_PATH)
             else:
                 # Default to AWS config
                 self.deployment_config = read_yaml(AWS_CONFIG_FILE_PATH)
@@ -153,6 +159,81 @@ class ConfigurationManager:
         """Get monitoring configuration from base config"""
         return self.base_config.get("monitoring", ConfigBox({}))
 
+    def get_pipeline_config(self) -> PipelineConfig:
+        """Get pipeline configuration with pipeline-specific state files"""
+        try:
+            pipeline_config = self.base_config.get("pipeline", ConfigBox({}))
+
+            # Extract state files configuration
+            state_files_config = pipeline_config.state_files or {}
+            state_files = {key: Path(path) for key, path in state_files_config.items()}
+
+            # Provide defaults if not specified
+            default_state_files = {
+                "data_pipeline": Path("artifacts/states/data_pipeline_state.json"),
+                "training_pipeline": Path(
+                    "artifacts/states/training_pipeline_state.json"
+                ),
+                "inference_pipeline": Path(
+                    "artifacts/states/inference_pipeline_state.json"
+                ),
+                "monitoring_pipeline": Path(
+                    "artifacts/states/monitoring_pipeline_state.json"
+                ),
+                "deployment_pipeline": Path(
+                    "artifacts/states/deployment_pipeline_state.json"
+                ),
+            }
+
+            # Merge with defaults
+            for key, default_path in default_state_files.items():
+                if key not in state_files:
+                    state_files[key] = default_path
+
+            return PipelineConfig(
+                artifacts_dir=Path(pipeline_config.artifacts_dir or "artifacts/"),
+                checkpoints_dir=Path(
+                    pipeline_config.checkpoints_dir or "artifacts/checkpoints/"
+                ),
+                state_files=state_files,
+                enable_state_persistence=pipeline_config.enable_state_persistence
+                or True,
+                state_auto_save=pipeline_config.state_auto_save or True,
+                state_retention_days=pipeline_config.state_retention_days or 30,
+                enable_pipeline_locks=pipeline_config.enable_pipeline_locks or True,
+            )
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error loading pipeline config, using defaults: {str(e)}"
+            )
+            # Return default config with pipeline-specific state files
+            default_state_files = {
+                "data_pipeline": Path("artifacts/states/data_pipeline_state.json"),
+                "training_pipeline": Path(
+                    "artifacts/states/training_pipeline_state.json"
+                ),
+                "inference_pipeline": Path(
+                    "artifacts/states/inference_pipeline_state.json"
+                ),
+                "monitoring_pipeline": Path(
+                    "artifacts/states/monitoring_pipeline_state.json"
+                ),
+                "deployment_pipeline": Path(
+                    "artifacts/states/deployment_pipeline_state.json"
+                ),
+            }
+
+            return PipelineConfig(
+                artifacts_dir=Path("artifacts/"),
+                checkpoints_dir=Path("artifacts/checkpoints/"),
+                state_files=default_state_files,
+                enable_state_persistence=True,
+                state_auto_save=True,
+                state_retention_days=30,
+                enable_pipeline_locks=True,
+            )
+
     # Additional convenience methods for specific configs
     def get_deberta_config(self) -> ConfigBox:
         """Get DeBERTa specific configuration"""
@@ -173,3 +254,79 @@ class ConfigurationManager:
             return local_config
         except Exception:
             return ConfigBox({})
+
+    def get_data_ingestion_config(self) -> DataIngestionConfig:
+        """
+        Get data ingestion configuration from config.yaml
+
+        Returns:
+            DataIngestionConfig: Configured data ingestion entity
+        """
+        try:
+            # Get data ingestion section from config.yaml
+            ingestion_config = self.base_config.data_ingestion
+
+            # Create the entity with proper type conversion
+            return DataIngestionConfig(
+                dataset_name=ingestion_config.dataset_name,
+                source_type=ingestion_config.source_type,
+                raw_data_dir=Path(ingestion_config.raw_data_dir),
+                dataset_filename=ingestion_config.dataset_filename,
+                sample_size=ingestion_config.sample_size or None,
+                random_state=ingestion_config.random_state or DEFAULT_RANDOM_STATE,
+            )
+
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to load data ingestion config: {str(e)}"
+            ) from e
+
+    def get_data_preprocessing_config(self) -> DataPreprocessingConfig:
+        """Get data preprocessing configuration"""
+        try:
+            preprocessing_config = self.base_config.data_preprocessing
+
+            return DataPreprocessingConfig(
+                text_column=preprocessing_config.text_column,
+                label_column=preprocessing_config.label_column,
+                source_column=preprocessing_config.source_column,
+                remove_duplicates=preprocessing_config.remove_duplicates,
+                min_text_length=preprocessing_config.min_text_length,
+                max_text_length=preprocessing_config.max_text_length,
+                lowercase=preprocessing_config.lowercase,
+                strip_whitespace=preprocessing_config.strip_whitespace,
+                remove_special_chars=preprocessing_config.remove_special_chars,
+                balance_classes=preprocessing_config.balance_classes,
+                processed_data_dir=Path(preprocessing_config.processed_data_dir),
+                processed_filename=preprocessing_config.processed_filename,
+                random_state=preprocessing_config.random_state or DEFAULT_RANDOM_STATE,
+            )
+
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to load data preprocessing config: {str(e)}"
+            ) from e
+
+    def get_data_validation_config(self) -> DataValidationConfig:
+        """Get data validation configuration"""
+        try:
+            validation_config = self.base_config.data_validation
+
+            return DataValidationConfig(
+                expected_columns=validation_config.expected_columns,
+                required_columns=validation_config.required_columns,
+                text_column=validation_config.text_column,
+                label_column=validation_config.label_column,
+                min_text_length=validation_config.min_text_length,
+                max_text_length=validation_config.max_text_length,
+                expected_labels=validation_config.expected_labels,
+                min_samples_per_class=validation_config.min_samples_per_class,
+                max_null_percentage=validation_config.max_null_percentage,
+                validation_report_dir=Path(validation_config.validation_report_dir),
+                report_filename=validation_config.report_filename,
+            )
+
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to load data validation config: {str(e)}"
+            ) from e

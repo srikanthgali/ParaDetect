@@ -8,6 +8,61 @@ data:
   processed_data_dir: "data/processed/"
   interim_data_dir: "data/interim/"
 
+# Data Ingestion Configuration
+data_ingestion:
+  dataset_name: "artem9k/ai-text-detection-pile"
+  source_type: "huggingface"  # huggingface, local, url
+  raw_data_dir: "data/raw/"
+  dataset_filename: "ai_text_detection_pile.csv"
+  #sample_size: null  # null for full dataset, integer for sampling
+  sample_size: 10000  # For development/testing, use a smaller sample
+  random_state: 42
+
+# Data Preprocessing Configuration
+data_preprocessing:
+  text_column: "text"
+  label_column: "generated"
+  source_column: "source"
+  remove_duplicates: true
+  min_text_length: 50
+  max_text_length: 5000
+  lowercase: false
+  strip_whitespace: true
+  remove_special_chars: false
+  balance_classes: true
+  processed_data_dir: "data/processed/"
+  processed_filename: "ai_text_detection_pile_processed.csv"
+  random_state: 42
+
+# Data Validation Configuration
+data_validation:
+  expected_columns: ["text", "generated", "source"]
+  required_columns: ["text", "generated"]
+  text_column: "text"
+  label_column: "generated"
+  min_text_length: 10
+  max_text_length: 10000
+  expected_labels: [0, 1]
+  min_samples_per_class: 100
+  max_null_percentage: 0.05
+  validation_report_dir: "artifacts/reports/"
+  report_filename: "data_validation_report.json"
+
+# Pipeline Configuration - State Management
+pipeline:
+  artifacts_dir: "artifacts/"
+  checkpoints_dir: "artifacts/checkpoints/"
+  state_files:
+    data_pipeline: "artifacts/states/data_pipeline_state.json"
+    training_pipeline: "artifacts/states/training_pipeline_state.json"
+    inference_pipeline: "artifacts/states/inference_pipeline_state.json"
+    monitoring_pipeline: "artifacts/states/monitoring_pipeline_state.json"
+    deployment_pipeline: "artifacts/states/deployment_pipeline_state.json"
+  enable_state_persistence: true
+  state_auto_save: true
+  state_retention_days: 30
+  enable_pipeline_locks: true  # Prevent concurrent pipeline execution
+
 logging:
   level: INFO
   format: '%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s'
@@ -15,6 +70,18 @@ logging:
 
   # Different log levels for different components
   loggers:
+    para_detect.components.data_ingestion:
+      level: DEBUG
+      handlers: [file, console]
+      propagate: false
+    para_detect.components.data_preprocessing:
+      level: DEBUG
+      handlers: [file, console]
+      propagate: false
+    para_detect.components.data_validation:
+      level: DEBUG
+      handlers: [file, console]
+      propagate: false
     para_detect.training:
       level: DEBUG
       handlers: [file, console]
@@ -27,26 +94,38 @@ logging:
 
   # Log rotation settings
   rotation:
+    when: "midnight"
+    interval: 1
+    backup_count: 30
     max_bytes: 10485760  # 10MB
-    backup_count: 5
 
-  # Structured logging for production
+  # Structured logging
   structured: false
   json_format: false
 
 # Environment-specific overrides
 environments:
   development:
+    data_ingestion:
+      sample_size: 1000  # Use smaller sample in development
     logging:
       level: DEBUG
-      structured: false
+    pipeline:
+      state_retention_days: 7
+      enable_pipeline_locks: false
 
   production:
     logging:
       level: INFO
       structured: true
-      json_format: true
+    data_ingestion:
+      sample_size: null  # Use full dataset in production
+    pipeline:
+      state_retention_days: 90
+      enable_pipeline_locks: true
 
 monitoring:
   enable_metrics: true
-  log_sampling_rate: 1.0  # 100% in dev, lower in prod
+  metrics_dir: "artifacts/metrics/"
+  track_data_drift: true
+  track_model_performance: true

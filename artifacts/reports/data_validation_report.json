@@ -1,0 +1,118 @@
+{
+  "metadata": {
+    "data_path": "data/processed/ai_text_detection_pile_processed.csv",
+    "validation_timestamp": "2025-10-09T22:18:49.488809",
+    "dataset_shape": [
+      548,
+      3
+    ],
+    "validation_passed": true
+  },
+  "configuration": {
+    "expected_columns": [
+      "text",
+      "generated",
+      "source"
+    ],
+    "required_columns": [
+      "text",
+      "generated"
+    ],
+    "min_text_length": 10,
+    "max_text_length": 10000,
+    "expected_labels": [
+      0,
+      1
+    ],
+    "min_samples_per_class": 100,
+    "max_null_percentage": 0.05
+  },
+  "validation_results": {
+    "schema": {
+      "missing_columns": [],
+      "extra_columns": [],
+      "actual_columns": [
+        "text",
+        "generated",
+        "source"
+      ],
+      "missing_required_columns": [],
+      "column_dtypes": {
+        "text": "object",
+        "generated": "int64",
+        "source": "object"
+      },
+      "validation_passed": true
+    },
+    "data_quality": {
+      "null_counts": {
+        "text": 0,
+        "generated": 0,
+        "source": 0
+      },
+      "null_percentages": {
+        "text": 0.0,
+        "generated": 0.0,
+        "source": 0.0
+      },
+      "duplicate_rows": 0,
+      "duplicate_percentage": 0.0,
+      "empty_rows": 0,
+      "quality_score": 1.0,
+      "validation_passed": true
+    },
+    "text_content": {
+      "length_stats": {
+        "min": 66,
+        "max": 4960,
+        "mean": 1838.558394160584,
+        "median": 996.5,
+        "std": 1421.2351524495493
+      },
+      "texts_too_short": 0,
+      "texts_too_long": 0,
+      "texts_within_range": 548,
+      "empty_texts": 0,
+      "unique_texts": 548,
+      "text_diversity_ratio": 1.0,
+      "validation_passed": "True"
+    },
+    "labels": {
+      "unique_labels": [
+        0,
+        1
+      ],
+      "null_labels": 0,
+      "unexpected_labels": [],
+      "missing_expected_labels": [],
+      "label_distribution": {
+        "1": 274,
+        "0": 274
+      },
+      "validation_passed": "True"
+    },
+    "class_distribution": {
+      "class_counts": {
+        "1": 274,
+        "0": 274
+      },
+      "total_samples": 548,
+      "class_percentages": {
+        "1": 50.0,
+        "0": 50.0
+      },
+      "min_samples_per_class": 274,
+      "insufficient_classes": {},
+      "balance_ratio": 1.0,
+      "is_balanced": true,
+      "validation_passed": "True"
+    }
+  },
+  "summary": {
+    "overall_validation_passed": true,
+    "total_checks": 5,
+    "passed_checks": 5,
+    "failed_checks": [],
+    "success_rate": 1.0
+  }
+}
