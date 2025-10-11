@@ -22,7 +22,7 @@ import torch
 # Load pre-trained model from HuggingFace Hub
 tokenizer = AutoTokenizer.from_pretrained("srikanthgali/paradetect-deberta-v3-lora")
 base_model = AutoModelForSequenceClassification.from_pretrained(
-    "microsoft/deberta-v3-large", 
+    "microsoft/deberta-v3-large",
     num_labels=2
 )
 model = PeftModel.from_pretrained(base_model, "srikanthgali/paradetect-deberta-v3-lora")
@@ -33,10 +33,10 @@ def predict_text_origin(text):
     with torch.no_grad():
         outputs = model(**inputs)
         probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
-    
+
     human_prob = probabilities[0][0].item()
     ai_prob = probabilities[0][1].item()
-    
+
     return {
         "prediction": "AI" if ai_prob > human_prob else "Human",
         "confidence": max(human_prob, ai_prob),
@@ -222,6 +222,7 @@ para-detect/
 │
 └── 🎨 assets/                                     # Static assets
     └── demo.gif                                   # Demo animation
+    └── demo.mp4                                   # Demo video
 ```
 
 ## 📊 Dataset & Exploratory Data Analysis
@@ -349,11 +350,11 @@ SAMPLE_SIZES = {
 - **Length Sensitivity**: Optimal performance with moderate text lengths
 - **Style Adaptability**: Effective across various writing styles and domains
 
-## 📺 Demo  
+## 📺 Demo
 
-Here's a quick demo of the ParaDetect app in action:  
+Here's a quick demo of the ParaDetect app in action:
 
-![App Demo](assets/demo.gif)  
+![App Demo](assets/demo.mp4)
 
 ### Interactive Web Application
 The project includes a professional Gradio-based web interface for real-time text analysis:
