@@ -353,8 +353,11 @@ SAMPLE_SIZES = {
 ## 📺 Demo
 
 Here's a quick demo of the ParaDetect app in action:
-
-![App Demo](assets/demo.mp4)
+> **App Demo:**
+>
+> [![Watch the demo video](assets/demo.gif)](assets/demo.mp4)
+>
+> [Click here to download or play the full demo video (MP4, 45MB)](assets/demo.mp4)
 
 ### Interactive Web Application
 The project includes a professional Gradio-based web interface for real-time text analysis:
