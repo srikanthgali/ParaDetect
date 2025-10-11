@@ -5,7 +5,7 @@
     "preprocessing_completed": true,
     "validation_completed": true,
     "validation_passed": true,
-    "last_run_timestamp": "2025-10-09T22:18:49.492901",
+    "last_run_timestamp": "2025-10-10T20:23:12.659063",
     "pipeline_version": "1.0.0",
     "data_paths": {
       "raw_data": "data/raw/ai_text_detection_pile.csv",
@@ -13,6 +13,6 @@
       "validation_report": "artifacts/reports/data_validation_report.json"
     }
   },
-  "saved_at": "2025-10-09T22:18:49.492903",
+  "saved_at": "2025-10-10T20:23:12.659066",
   "version": "1.0.0"
 }

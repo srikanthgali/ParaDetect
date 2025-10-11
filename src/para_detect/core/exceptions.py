@@ -81,7 +81,49 @@ class ModelPredictionError(ParaDetectException):
     pass
 
 
-class ConfigurationError(ParaDetectException):
-    """Exception raised for configuration issues"""
+class MLPipelineException(ParaDetectException):
+    """Exception for ML pipeline operations"""
+
+    pass
+
+
+class ModelTrainingError(MLPipelineException):
+    """Exception for model training errors"""
+
+    pass
+
+
+class ModelEvaluationError(MLPipelineException):
+    """Exception for model evaluation errors"""
+
+    pass
+
+
+class ModelValidationError(MLPipelineException):
+    """Exception for model validation errors"""
+
+    pass
+
+
+class ModelRegistrationError(MLPipelineException):
+    """Exception for model registration errors"""
+
+    pass
+
+
+class ModelPredictionError(MLPipelineException):
+    """Exception for model prediction errors"""
+
+    pass
+
+
+class DeviceError(ParaDetectException):
+    """Exception for device-related errors"""
+
+    pass
+
+
+class CheckpointError(MLPipelineException):
+    """Exception for checkpoint operations"""
 
     pass

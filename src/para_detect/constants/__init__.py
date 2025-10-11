@@ -21,6 +21,10 @@ VALIDATION_REPORT_DIR = ARTIFACTS_DIR / "validation_reports"
 LOGS_DIR = ARTIFACTS_DIR / "logs"
 METRICS_DIR = ARTIFACTS_DIR / "metrics"
 MODELS_DIR = ARTIFACTS_DIR / "models"
+CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
+EVALUATION_DIR = ARTIFACTS_DIR / "evaluation"
+MODEL_REGISTRY_DIR = ARTIFACTS_DIR / "model_registry"
+STATES_DIR = ARTIFACTS_DIR / "states"
 
 # Data processing constants
 DEFAULT_RANDOM_STATE = 42
@@ -34,3 +38,53 @@ DEFAULT_TEST_SPLIT = 0.15
 HUMAN_LABEL = 0
 AI_LABEL = 1
 LABEL_MAPPING = {"human": HUMAN_LABEL, "ai": AI_LABEL}
+REVERSE_LABEL_MAPPING = {HUMAN_LABEL: "human", AI_LABEL: "ai"}
+
+# Model constants
+DEFAULT_MODEL_NAME = "microsoft/deberta-v3-large"
+DEFAULT_TOKENIZER_NAME = "microsoft/deberta-v3-large"
+DEFAULT_MAX_LENGTH = 512
+DEFAULT_NUM_LABELS = 2
+
+# Training constants
+DEFAULT_BATCH_SIZE = 16
+DEFAULT_EVAL_BATCH_SIZE = 32
+DEFAULT_LEARNING_RATE = 2e-5
+DEFAULT_NUM_EPOCHS = 3
+DEFAULT_WARMUP_RATIO = 0.1
+DEFAULT_WEIGHT_DECAY = 0.01
+
+# LoRA constants
+DEFAULT_LORA_R = 64
+DEFAULT_LORA_ALPHA = 128
+DEFAULT_LORA_DROPOUT = 0.1
+DEFAULT_LORA_TARGET_MODULES = [
+    "query_proj",
+    "key_proj",
+    "value_proj",
+    "dense",
+    "output.dense",
+]
+
+# Evaluation constants
+DEFAULT_METRICS = [
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "roc_auc",
+    "precision_recall_auc",
+]
+
+# Validation thresholds
+DEFAULT_MIN_ACCURACY = 0.85
+DEFAULT_MIN_F1 = 0.85
+DEFAULT_MIN_AUC = 0.85
+
+# Device detection priority
+DEVICE_PRIORITY = ["cuda", "mps", "cpu"]
+
+# File extensions
+MODEL_FILE_EXTENSIONS = [".bin", ".safetensors", ".pt", ".pth"]
+CONFIG_FILE_EXTENSIONS = [".json", ".yaml", ".yml"]
+TOKENIZER_FILE_EXTENSIONS = [".json", ".txt", ".model"]

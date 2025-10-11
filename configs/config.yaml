@@ -14,7 +14,6 @@ data_ingestion:
   source_type: "huggingface"  # huggingface, local, url
   raw_data_dir: "data/raw/"
   dataset_filename: "ai_text_detection_pile.csv"
-  #sample_size: null  # null for full dataset, integer for sampling
   sample_size: 10000  # For development/testing, use a smaller sample
   random_state: 42
 
@@ -61,71 +60,123 @@ pipeline:
   enable_state_persistence: true
   state_auto_save: true
   state_retention_days: 30
-  enable_pipeline_locks: true  # Prevent concurrent pipeline execution
+  enable_pipeline_locks: true
 
+# Inference Configuration
+inference:
+  # Model configuration
+  model_path: null  # Path to trained model, null for latest
+  tokenizer_path: null  # Path to tokenizer, null to use model_path
+  device_preference: "auto"  # auto, cuda, mps, cpu
+
+  # Inference parameters
+  batch_size: 32
+  max_length: 512
+
+  # Processing configuration
+  text_column: "text"
+  preprocessing_enabled: true
+
+  # Output configuration
+  include_probabilities: true
+  include_confidence: true
+  confidence_threshold: 0.5
+
+  # Monitoring configuration
+  enable_monitoring: true
+  log_predictions: false  # For privacy, default to False
+
+  # Batch processing configuration
+  chunk_size: 1000  # For large batch processing
+  progress_bar: true
+
+  # Error handling
+  skip_errors: true
+  max_retries: 3
+
+  # API configuration
+  api:
+    host: "0.0.0.0"
+    port: 8000
+    workers: 1
+    reload: false
+
+# Logging Configuration
 logging:
-  level: INFO
-  format: '%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s'
-  log_dir: artifacts/logs/
+  level: "INFO"
+  format: "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s"
+  log_dir: "artifacts/logs/"
 
-  # Different log levels for different components
+  # Component-specific logging
   loggers:
-    para_detect.components.data_ingestion:
-      level: DEBUG
-      handlers: [file, console]
+    data_pipeline:
+      level: "INFO"
+      handlers: ["console", "main_file"]
       propagate: false
-    para_detect.components.data_preprocessing:
-      level: DEBUG
-      handlers: [file, console]
+    training_pipeline:
+      level: "INFO"
+      handlers: ["console", "main_file"]
       propagate: false
-    para_detect.components.data_validation:
-      level: DEBUG
-      handlers: [file, console]
+    inference_pipeline:
+      level: "INFO"
+      handlers: ["console", "main_file"]
       propagate: false
-    para_detect.training:
-      level: DEBUG
-      handlers: [file, console]
-    para_detect.inference:
-      level: INFO
-      handlers: [file, console]
-    para_detect.api:
-      level: INFO
-      handlers: [file, console, error_file]
+    model_training:
+      level: "DEBUG"
+      handlers: ["console", "main_file", "debug_file"]
+      propagate: false
 
-  # Log rotation settings
+  # Enhanced log rotation with date-based naming
   rotation:
-    when: "midnight"
-    interval: 1
-    backup_count: 30
-    max_bytes: 10485760  # 10MB
+    when: "midnight"           # midnight, H, D, W0-W6
+    interval: 1                # Rotate every interval
+    backup_count: 7            # Keep 7 days of logs
+    compress: true             # Compress old logs
+    retention_days: 30         # Clean up logs older than 30 days
 
-  # Structured logging
-  structured: false
-  json_format: false
+  # Structured logging for production
+  structured: false            # Enable for production
+  json_format: false          # Enable for production
+
+# Monitoring Configuration
+monitoring:
+  enable: true
+  metrics_dir: "artifacts/metrics/"
+  track_data_drift: true
+  track_model_performance: true
 
 # Environment-specific overrides
 environments:
   development:
     data_ingestion:
-      sample_size: 1000  # Use smaller sample in development
+      sample_size: 1000  # Smaller sample for development
     logging:
-      level: DEBUG
-    pipeline:
-      state_retention_days: 7
-      enable_pipeline_locks: false
+      level: "DEBUG"
+      rotation:
+        backup_count: 3
+        retention_days: 7
+
+  staging:
+    data_ingestion:
+      sample_size: 50000
+    logging:
+      level: "INFO"
+      structured: true
+      rotation:
+        backup_count: 14
+        retention_days: 30
 
   production:
-    logging:
-      level: INFO
-      structured: true
     data_ingestion:
-      sample_size: null  # Use full dataset in production
-    pipeline:
-      state_retention_days: 90
-      enable_pipeline_locks: true
-
-monitoring:
-  enable_metrics: true
-  metrics_dir: "artifacts/metrics/"
-  track_data_drift: true
-  track_model_performance: true
+      sample_size: null  # Full dataset
+    logging:
+      level: "WARNING"
+      structured: true
+      json_format: true
+      rotation:
+        backup_count: 30
+        retention_days: 90
+        compress: true
+    inference:
+      log_predictions: false
+      enable_monitoring: true

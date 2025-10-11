@@ -1,1 +1,172 @@
-key: value
+# Training Configuration for ParaDetect
+
+# Model Training Parameters
+training:
+  output_dir: "artifacts/models"
+  num_train_epochs: 3
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 2e-4
+  weight_decay: 0.01
+  warmup_steps: 0
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+
+  # Precision settings
+  fp16: false
+  bf16: true
+
+  # DataLoader settings
+  dataloader_num_workers: 0
+  dataloader_pin_memory: false
+  remove_unused_columns: false
+  gradient_checkpointing: false
+
+  # Resumption and checkpointing
+  resume_from_checkpoint: true
+  checkpoint_interval_steps: 250
+
+  # LoRA/PEFT configuration
+  use_peft: true
+
+  # Logging and monitoring
+  logging_steps: 100
+  report_to: "tensorboard"  # ["wandb", "tensorboard"] or null
+  run_name: "deberta-v3-large-finetuning"   # Optional run name
+
+  # Device configuration
+  device_preference: "auto"  # auto, cuda, mps, cpu
+
+  # Random seed
+  seed: 42
+
+# Dataset Configuration
+dataset:
+  train_path: null  # Path to training CSV or null to use data pipeline
+  validation_split: 0.15
+  test_split: 0.15
+  max_length: 512
+  text_column: "text"
+  label_column: "generated"
+
+# Evaluation Configuration
+evaluation:
+  # Evaluation strategy
+  eval_strategy: "steps"
+  eval_steps: 250
+
+  # Saving strategy
+  save_strategy: "steps"
+  save_steps: 250
+  save_total_limit: 3
+
+  # Best model selection
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_f1"
+  greater_is_better: true
+
+  # Early stopping
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.001
+
+  # Evaluation metrics
+  metrics: ["accuracy", "precision", "recall", "f1"]
+  save_best_by: "f1"
+
+  # Evaluation batch size
+  eval_batch_size: 32
+
+  # Output configuration
+  evaluation_output_dir: "artifacts/evaluation"
+  save_confusion_matrix: true
+  save_classification_report: true
+  save_roc_curve: true
+  save_precision_recall_curve: true
+
+  # Calibration analysis
+  perform_calibration_analysis: true
+  calibration_bins: 10
+
+  # Per-class analysis
+  compute_per_class_metrics: true
+
+  # Device configuration
+  device_preference: null  # inherit from training
+
+# Model Validation Configuration
+validation:
+  # Threshold validation
+  min_accuracy: 0.85
+  min_f1: 0.85
+  min_precision: 0.80
+  min_recall: 0.80
+  min_auc: 0.85
+
+  # Calibration validation
+  max_brier_score: 0.25
+  max_ece: 0.1  # Expected Calibration Error
+  calibration_bins: 10
+
+  # Class-specific validation
+  min_per_class_f1: 0.75
+  max_class_imbalance_ratio: 3.0
+
+  # Fairness and bias checks
+  perform_fairness_checks: true
+  max_demographic_parity_diff: 0.1
+  max_equalized_odds_diff: 0.1
+
+  # Distribution checks
+  check_prediction_distribution: true
+  max_prediction_skew: 0.8  # Maximum ratio of one class
+
+  # Allowed label values
+  allowed_label_values: [0, 1]
+
+  # Output configuration
+  validation_output_dir: "artifacts/validation"
+  save_validation_report: true
+
+# Model Registration Configuration
+registration:
+  # Hugging Face Hub configuration
+  use_hf: true
+  hf_repo_id: null # Set this for your repository
+  hf_token: null    # Set via environment variable HF_TOKEN
+  push_to_hub: true
+  private_repo: false
+
+  # MLflow configuration
+  use_mlflow: false
+  mlflow_tracking_uri: "file:./mlruns"
+  mlflow_experiment_name: "paradetect"
+  mlflow_model_name: "paradetect-deberta"
+  mlflow_stage: "Staging"  # None, Staging, Production, Archived
+
+  # AWS SageMaker configuration
+  use_sagemaker: false
+  sagemaker_role: null
+  sagemaker_bucket: null
+  sagemaker_model_name: null
+
+  # Local registry configuration
+  local_registry_dir: "artifacts/model_registry"
+
+  # Model metadata
+  model_description: "DeBERTa-v3-Large fine-tuned for AI vs Human text detection using LoRA"
+  model_tags:
+    task: "text-classification"
+    domain: "ai-detection"
+    language: "en"
+    framework: "pytorch"
+  license: "apache-2.0"
+
+  # Registration validation
+  require_validation_pass: true
+  dry_run: false
+  force_overwrite: false
+
+  # Model card generation
+  generate_model_card: true
+  model_card_template: null

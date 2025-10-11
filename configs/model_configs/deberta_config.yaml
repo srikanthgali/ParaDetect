@@ -1,1 +1,70 @@
-key: value
+# DeBERTa Model Configuration for ParaDetect
+
+# Base Model Configuration
+model:
+  model_name_or_path: "microsoft/deberta-v3-large"
+  tokenizer_name_or_path: null  # Will use model_name_or_path if null
+  num_labels: 2
+
+  # Model precision
+  torch_dtype: "float32"  # float32, float16, bfloat16
+
+# LoRA (Low-Rank Adaptation) Configuration
+lora:
+  # LoRA parameters
+  r: 64                    # Rank - higher values = more parameters but potentially better performance
+  lora_alpha: 128          # LoRA scaling parameter
+  lora_dropout: 0.1        # Dropout for LoRA layers
+  bias: "all"             # Bias adaptation: "none", "all", "lora_only"
+
+  # Target modules for LoRA adaptation
+  target_modules:
+    - "query_proj"
+    - "key_proj"
+    - "value_proj"
+    - "dense"
+    - "output.dense"
+
+  # Task type
+  task_type: "SEQ_CLS"     # Sequence classification
+  inference_mode: false
+
+# Tokenizer Configuration
+tokenizer:
+  # Tokenization parameters
+  truncation: true
+  padding: true
+  max_length: 512
+  return_tensors: "None"  # "pt", "tf", "np", or "None"
+
+# Model Loading Configuration
+loading:
+  # Device mapping
+  device_map: "auto"               # auto, cpu, or specific device mapping
+
+  # Loading precision
+  torch_dtype_loading: "auto"    # auto, float32, float16, bfloat16
+
+  # Low memory loading
+  low_cpu_mem_usage: true
+
+  # Trust remote code
+  trust_remote_code: false
+
+# Model Saving Configuration
+saving:
+  # Saving precision
+  save_model: true
+  torch_dtype_saving: "float32"
+
+  # Save format
+  safe_serialization: true       # Use safetensors format
+
+  # Metadata saving
+  save_metadata: true
+  save_config: true
+  save_tokenizer: true
+
+  # Version control
+  create_model_card: true
+  save_training_args: true

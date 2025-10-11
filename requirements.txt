@@ -1,33 +1,58 @@
-numpy
-pandas
-scikit-learn
-matplotlib
-seaborn
-tensorflow
-flask
-requests
-ipykernel
+# Core ML libraries
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.14.0
+accelerate>=0.20.0
+peft>=0.4.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Visualization and analysis
+matplotlib>=3.7.0
+seaborn>=0.12.0
 wordcloud
-nltk
-torch
-transformers
-peft
-datasets
-wandb
-tf-keras
-accelerate
 tensorboard
-gradio
-python-box
-pytest
-fastapi
-uvicorn
+
+# Configuration and utilities
+pyyaml>=6.0
+python-box>=7.0.0
+pathlib
+tqdm>=4.65.0
+nltk
+
+# Optional dependencies for specific features
+# Web server (optional)
+fastapi>=0.100.0
+uvicorn>=0.22.0
 jinja2
-ensure
-boto3
+
+# Interactive interface (optional)
+gradio>=3.35.0
+
+# Model registry (optional)
+mlflow>=2.5.0
+
+# Hugging Face Hub (optional)
+huggingface-hub>=0.16.0
+
+# AWS (optional)
+boto3>=1.28.0
 mypy-boto3-s3
-structlog
+sagemaker>=2.175.0
+
+# Monitoring and logging
+structlog>=23.1.0
 python-json-logger
+
+# Development and testing (optional)
+pytest>=7.4.0
+black>=23.7.0
+isort>=5.12.0
+flake8>=6.0.0
+mypy>=1.5.0
 pyyaml
 ensure
 -e .
