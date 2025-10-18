@@ -197,6 +197,7 @@ experiments/
 artifacts/checkpoints/*
 artifacts/models/*
 artifacts/tokenized_datasets/*
+artifacts/model_registry/*
 
 # WandB files
 wandb/

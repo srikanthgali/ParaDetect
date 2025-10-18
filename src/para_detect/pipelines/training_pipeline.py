@@ -700,15 +700,19 @@ class TrainingPipeline(BasePipeline):
 
         # Initialize registrar
         registration_config = self.config_manager.get_model_registration_config()
-        from dataclasses import replace
 
-        registration_config = replace(
-            registration_config,
-            local_registry_dir=self.run_dir.parent.parent / "model_registry",
-            dry_run=self.dry_run,
-        )
+        # Override dry_run if set at pipeline level
+        if self.dry_run:
+            registration_config.dry_run = True
 
         self.model_registrar = ModelRegistrar(registration_config)
+
+        # Log the paths for better visibility
+        training_model_path = self.training_artifacts["model_path"]
+        self.logger.info(f"📁 Training model location: {training_model_path}")
+        self.logger.info(
+            f"📦 Registry location: {registration_config.local_registry_dir}"
+        )
 
         # Prepare comprehensive metadata for model card generation
         training_config = self.config_manager.get_model_training_config()
@@ -771,6 +775,17 @@ class TrainingPipeline(BasePipeline):
                 "organization": "Independent Research",
                 "repository_url": "https://github.com/srikanthgali/para_detect",
                 "contact": "https://github.com/srikanthgali/para_detect/issues",
+                "training_artifacts_path": str(
+                    self.run_dir
+                ),  # Link back to training run
+                "config_hash": self._get_config_hash(),
+            },
+            # Provenance tracking
+            "provenance": {
+                "training_run_id": self.run_id,
+                "training_artifacts_dir": str(self.run_dir),
+                "source_model_path": str(training_model_path),
+                "created_from": "training_pipeline",
             },
         }
 
@@ -778,10 +793,9 @@ class TrainingPipeline(BasePipeline):
         if training_config.use_peft and training_config.peft_config:
             peft_config = training_config.peft_config
             if hasattr(peft_config, "__dict__"):
-                # Convert ConfigBox to dict
-                peft_dict = dict(peft_config)
+                peft_dict = peft_config.__dict__
             else:
-                peft_dict = peft_config if isinstance(peft_config, dict) else {}
+                peft_dict = peft_config
 
             metadata["peft_config"] = {
                 "r": peft_dict.get("r", 64),
@@ -814,17 +828,43 @@ class TrainingPipeline(BasePipeline):
                 model_path=self.training_artifacts["model_path"],
                 tokenizer_path=self.training_artifacts[
                     "model_path"
-                ],  # Same path for both
+                ],  # Same path typically
                 metadata=metadata,
                 validation_passed=validation_passed,
             )
 
             self.training_artifacts["registration_results"] = registration_result
 
+            # Enhanced logging for registration results
             if registration_result.get("success", False):
                 self.logger.info("✅ Model registration completed successfully")
+
+                # Log detailed registry information
+                if "local" in registration_result.get("registrations", {}):
+                    local_result = registration_result["registrations"]["local"]
+                    registry_path = local_result.get("registry_location")
+                    model_version = local_result.get("version")
+                    model_path = local_result.get("model_path")
+
+                    self.logger.info(f"   📍 Registry: {registry_path}")
+                    self.logger.info(f"   🏷️  Version: {model_version}")
+                    self.logger.info(f"   🤖 Model: {model_path}")
+                    self.logger.info(f"   📄 Latest info: {registry_path}/LATEST")
+
+                    # Log convenient access paths
+                    if registry_path:
+                        registry_dir = Path(registry_path)
+                        latest_file = registry_dir / "LATEST"
+                        if latest_file.exists():
+                            self.logger.info(
+                                f"   💡 To load latest model, read: {latest_file}"
+                            )
             else:
-                self.logger.warning("⚠️ Model registration had issues")
+                self.logger.warning("⚠️ Model registration completed with errors")
+                # Log any errors
+                errors = registration_result.get("errors", {})
+                for registry, error in errors.items():
+                    self.logger.warning(f"   {registry}: {error}")
 
         except Exception as e:
             self.logger.error(f"❌ Model registration failed: {str(e)}")

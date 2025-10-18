@@ -362,7 +362,7 @@ class ModelRegistrar:
     ) -> Dict[str, Any]:
         """Register model to local registry."""
         try:
-            # Create version directory
+            # Create version directory in the configured registry location
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             version_dir = self.config.local_registry_dir / timestamp
             version_dir.mkdir(parents=True, exist_ok=True)
@@ -370,15 +370,19 @@ class ModelRegistrar:
             if self.config.dry_run:
                 return {"status": "dry_run", "version_dir": str(version_dir)}
 
-            # Copy model files
-            import shutil
+            # Copy model files to registry (clean production copy)
+            self.logger.info(f"📦 Copying model to registry: {version_dir}")
 
             model_dest = version_dir / "model"
             shutil.copytree(model_path, model_dest, dirs_exist_ok=True)
 
+            # Handle tokenizer path
             if tokenizer_path != model_path:
                 tokenizer_dest = version_dir / "tokenizer"
                 shutil.copytree(tokenizer_path, tokenizer_dest, dirs_exist_ok=True)
+            else:
+                # If tokenizer and model are in the same path, just reference the model directory
+                tokenizer_dest = model_dest
 
             # Enhanced metadata with JSON serialization fix
             metadata_enhanced = {
@@ -386,12 +390,10 @@ class ModelRegistrar:
                 "version": timestamp,
                 "registration_timestamp": datetime.now().isoformat(),
                 "model_path": str(model_dest),
-                "tokenizer_path": (
-                    str(tokenizer_dest)
-                    if tokenizer_path != model_path
-                    else str(model_dest)
-                ),
+                "tokenizer_path": str(tokenizer_dest),
                 "registry_type": "local",
+                "registry_location": str(version_dir),
+                "production_ready": True,  # Mark as production-ready
                 "tags": self.config.model_tags or {},
                 "description": self.config.model_description,
                 "license": self.config.license,
@@ -405,18 +407,122 @@ class ModelRegistrar:
             with open(metadata_path, "w") as f:
                 json.dump(metadata_enhanced, f, indent=2)
 
+            # Generate model card in registry location
+            if self.config.generate_model_card:
+                try:
+                    self._generate_model_card(str(model_dest), metadata)
+                    self.logger.info(f"📄 Model card generated in registry")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to generate model card in registry: {str(e)}"
+                    )
+
             # Update registry index
             self._update_local_registry_index(timestamp, metadata_enhanced)
+
+            # Create a "latest" marker file instead of symlink
+            self._update_latest_marker(timestamp, version_dir)
 
             return {
                 "status": "success",
                 "version": timestamp,
                 "version_dir": str(version_dir),
                 "metadata_path": str(metadata_path),
+                "model_path": str(model_dest),
+                "tokenizer_path": str(tokenizer_dest),
+                "registry_location": str(self.config.local_registry_dir),
             }
 
         except Exception as e:
             raise ModelRegistrationError(f"Local registration failed: {str(e)}") from e
+
+    def _update_latest_marker(self, version: str, version_dir: Path):
+        """Update 'latest' marker to point to the newest model version (without symlinks)."""
+        try:
+            latest_file = self.config.local_registry_dir / "LATEST"
+
+            # Create a simple text file containing the latest version info
+            latest_info = {
+                "version": version,
+                "version_dir": str(version_dir),
+                "model_path": str(version_dir / "model"),
+                "tokenizer_path": str(
+                    version_dir / "model"
+                ),  # Same as model for most cases
+                "updated_at": datetime.now().isoformat(),
+            }
+
+            with open(latest_file, "w") as f:
+                json.dump(latest_info, f, indent=2)
+
+            self.logger.info(f"📝 Updated LATEST marker to version {version}")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to update latest marker: {str(e)}")
+
+    def get_latest_model_info(self) -> Optional[Dict[str, Any]]:
+        """Get information about the latest registered model."""
+        try:
+            latest_file = self.config.local_registry_dir / "LATEST"
+
+            if not latest_file.exists():
+                return None
+
+            with open(latest_file, "r") as f:
+                latest_info = json.load(f)
+
+            # Verify the version directory still exists
+            version_dir = Path(latest_info["version_dir"])
+            if not version_dir.exists():
+                self.logger.warning(
+                    f"Latest version directory not found: {version_dir}"
+                )
+                return None
+
+            return latest_info
+
+        except Exception as e:
+            self.logger.warning(f"Failed to get latest model info: {str(e)}")
+            return None
+
+    def list_available_models(self) -> List[Dict[str, Any]]:
+        """List all available models in the local registry."""
+        try:
+            index_path = self.config.local_registry_dir / "registry_index.json"
+
+            if not index_path.exists():
+                return []
+
+            with open(index_path, "r") as f:
+                index = json.load(f)
+
+            return index.get("models", [])
+
+        except Exception as e:
+            self.logger.warning(f"Failed to list available models: {str(e)}")
+            return []
+
+    def get_model_by_version(self, version: str) -> Optional[Dict[str, Any]]:
+        """Get model information by version."""
+        try:
+            models = self.list_available_models()
+
+            for model in models:
+                if model.get("version") == version:
+                    # Verify the model directory exists
+                    model_path = Path(model.get("model_path", ""))
+                    if model_path.exists():
+                        return model
+                    else:
+                        self.logger.warning(
+                            f"Model version {version} directory not found: {model_path}"
+                        )
+
+            return None
+
+        except Exception as e:
+            self.logger.warning(f"Failed to get model by version {version}: {str(e)}")
+            return None
 
     def _update_local_registry_index(self, version: str, metadata: Dict[str, Any]):
         """Update local registry index."""
