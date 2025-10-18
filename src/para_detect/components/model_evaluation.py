@@ -20,13 +20,21 @@ from sklearn.metrics import (
     roc_curve,
     precision_recall_curve,
     average_precision_score,
-    calibration_curve,
     brier_score_loss,
 )
+
+# Import calibration_curve from the correct module
+try:
+    from sklearn.calibration import calibration_curve
+except ImportError:
+    # Fallback for very old versions
+    from sklearn.metrics import calibration_curve
+
 from sklearn.calibration import CalibratedClassifierCV
 import torch
+import torch.nn.functional as f
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -192,15 +200,20 @@ class ModelEvaluator:
                 self.logger.info(f"📈 Evaluating on {len(texts):,} samples...")
                 predictions, probabilities = self._generate_predictions(texts)
 
+            # Normalize probs to 1D positive class
+            probabilities = self._to_binary_probs(probabilities)
+
             # Store for analysis
-            self.predictions = predictions
-            self.true_labels = labels
+            self.predictions = np.asarray(predictions)
+            self.true_labels = np.asarray(labels)
             self.probabilities = probabilities
 
             # Compute metrics
-            metrics = self.compute_metrics(predictions, labels, probabilities)
+            metrics = self.compute_metrics(
+                self.predictions, self.true_labels, self.probabilities
+            )
 
-            # Generate visualizations
+            # Visualizations
             if any(
                 [
                     self.config.save_confusion_matrix,
@@ -208,27 +221,33 @@ class ModelEvaluator:
                     self.config.save_precision_recall_curve,
                 ]
             ):
-                self._generate_visualizations(predictions, labels, probabilities)
+                self._generate_visualizations(
+                    self.predictions, self.true_labels, self.probabilities
+                )
 
-            # Perform calibration analysis
-            if self.config.perform_calibration_analysis:
-                calibration_metrics = self._analyze_calibration(probabilities, labels)
-                metrics.update(calibration_metrics)
+            # Calibration analysis
+            if (
+                self.config.perform_calibration_analysis
+                and self.probabilities is not None
+            ):
+                _ = self._analyze_calibration(self.probabilities, self.true_labels)
 
             # Per-class analysis
             if self.config.compute_per_class_metrics:
-                per_class_metrics = self._compute_per_class_metrics(predictions, labels)
-                metrics["per_class_metrics"] = per_class_metrics
+                _ = self._compute_per_class_metrics(self.predictions, self.true_labels)
 
-            # Save evaluation report
-            if self.config.save_classification_report:
-                self._save_classification_report(predictions, labels)
-
-            # Prepare final results
+            # Prepare final results (include preds/labels/probs for validator)
             self.evaluation_results = {
                 "metrics": metrics,
+                "predictions": self.predictions.tolist(),
+                "true_labels": self.true_labels.tolist(),
+                "probabilities": (
+                    self.probabilities.tolist()
+                    if self.probabilities is not None
+                    else None
+                ),
                 "evaluation_config": {
-                    "num_samples": len(texts),
+                    "num_samples": int(len(self.true_labels)),
                     "device_used": str(self.device),
                     "max_length": self.config.max_length,
                     "batch_size": self.config.eval_batch_size,
@@ -237,9 +256,7 @@ class ModelEvaluator:
                 "model_performance_summary": self._create_performance_summary(metrics),
             }
 
-            # Save results
             self._save_evaluation_results()
-
             self.logger.info("✅ Evaluation completed successfully!")
             return self.evaluation_results
 
@@ -249,31 +266,37 @@ class ModelEvaluator:
     def _generate_predictions_from_tokenized(
         self, dataset: Dataset
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate predictions from already tokenized dataset (more efficient)."""
+        """Generate predictions from already tokenized dataset efficiently."""
         try:
-            predictions = []
-            probabilities = []
-
+            self.model.eval()
+            preds = []
+            probs = []
             batch_size = self.config.eval_batch_size
 
-            for i in range(0, len(dataset), batch_size):
-                batch = dataset[i : i + batch_size]
+            with torch.no_grad():
+                for i in range(0, len(dataset), batch_size):
+                    batch = dataset[i : i + batch_size]
 
-                # Prepare batch tensors
-                input_ids = torch.tensor(batch["input_ids"]).to(self.device)
-                attention_mask = torch.tensor(batch["attention_mask"]).to(self.device)
+                    # Prepare batch tensors
+                    input_ids = torch.tensor(batch["input_ids"], device=self.device)
+                    attention_mask = torch.tensor(
+                        batch["attention_mask"], device=self.device
+                    )
 
-                with torch.no_grad():
+                    # Forward pass
                     outputs = self.model(
                         input_ids=input_ids, attention_mask=attention_mask
                     )
-                    batch_probs = torch.softmax(outputs.logits, dim=-1)
-                    batch_preds = torch.argmax(batch_probs, dim=-1)
+                    logits = outputs.logits
 
-                    predictions.extend(batch_preds.cpu().numpy())
-                    probabilities.extend(batch_probs.cpu().numpy())
+                    # Get predictions and probabilities
+                    batch_preds = torch.argmax(logits, dim=1).cpu().numpy()
+                    p = f.softmax(logits, dim=1).cpu().numpy()
 
-            return np.array(predictions), np.array(probabilities)
+                    preds.extend(batch_preds)
+                    probs.extend(p)
+
+            return np.array(preds), np.array(probs)
 
         except Exception as e:
             raise ModelEvaluationError(
@@ -314,59 +337,62 @@ class ModelEvaluator:
             ) from e
 
     def _generate_predictions(self, texts: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate model predictions and probabilities."""
+        """Generate predictions for raw texts using the model directly."""
         try:
-            predictions = []
-            probabilities = []
+            self.model.eval()
+            preds = []
+            probs = []
+            bs = self.config.eval_batch_size
 
-            # Process in batches
-            batch_size = self.config.eval_batch_size
+            with torch.no_grad():
+                for i in range(0, len(texts), bs):
+                    batch_texts = texts[i : i + bs]
 
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i : i + batch_size]
-
-                # Get predictions
-                batch_results = self.classifier(batch_texts)
-
-                for result in batch_results:
-                    # Extract probabilities (assuming binary classification)
-                    probs = {item["label"]: item["score"] for item in result}
-
-                    # Get prediction (highest probability)
-                    pred_label = max(probs, key=probs.get)
-                    pred_idx = 1 if pred_label in ["LABEL_1", "AI", "ai"] else 0
-
-                    predictions.append(pred_idx)
-
-                    # Store probabilities for positive class (AI)
-                    if "LABEL_1" in probs:
-                        prob_positive = probs["LABEL_1"]
-                    elif "AI" in probs:
-                        prob_positive = probs["AI"]
-                    elif "ai" in probs:
-                        prob_positive = probs["ai"]
-                    else:
-                        # Fallback: use the probability of the predicted class if it's class 1
-                        prob_positive = (
-                            max(probs.values())
-                            if pred_idx == 1
-                            else 1 - max(probs.values())
-                        )
-
-                    probabilities.append(prob_positive)
-
-                # Progress logging
-                if (i // batch_size + 1) % 10 == 0:
-                    self.logger.info(
-                        f"   Processed {min(i + batch_size, len(texts)):,}/{len(texts):,} samples"
+                    # Tokenize batch
+                    encoded = self.tokenizer(
+                        batch_texts,
+                        truncation=True,
+                        padding=True,
+                        max_length=self.config.max_length,
+                        return_tensors="pt",
                     )
 
-            return np.array(predictions), np.array(probabilities)
+                    # Move to device
+                    input_ids = encoded["input_ids"].to(self.device)
+                    attention_mask = encoded["attention_mask"].to(self.device)
+
+                    # Forward pass
+                    outputs = self.model(
+                        input_ids=input_ids, attention_mask=attention_mask
+                    )
+                    logits = outputs.logits
+
+                    # Get predictions and probabilities
+                    batch_preds = torch.argmax(logits, dim=1).cpu().numpy()
+                    p = f.softmax(logits, dim=1).cpu().numpy()
+
+                    preds.extend(batch_preds)
+                    probs.extend(p)
+
+            return np.array(preds), np.array(probs)
 
         except Exception as e:
             raise ModelEvaluationError(
                 f"Failed to generate predictions: {str(e)}"
             ) from e
+
+    def _to_binary_probs(
+        self, probabilities: Optional[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """Ensure 1D positive-class probabilities for binary tasks."""
+        if probabilities is None:
+            return None
+        probs = np.asarray(probabilities)
+        if probs.ndim == 2 and probs.shape[1] >= 2:
+            return probs[:, 1]
+        if probs.ndim > 1:
+            return probs.reshape(-1)
+        return probs
 
     def compute_metrics(
         self,

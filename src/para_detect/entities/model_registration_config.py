@@ -8,6 +8,7 @@ class ModelRegistrationConfig:
     """Configuration for model registration and publishing"""
 
     # Hugging Face Hub configuration
+    registry_type: str = "local"  # local, hf-hub, mlflow, sagemaker
     use_hf: bool = True
     hf_repo_id: Optional[str] = None
     hf_token: Optional[str] = None

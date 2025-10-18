@@ -14,7 +14,7 @@ data_ingestion:
   source_type: "huggingface"  # huggingface, local, url
   raw_data_dir: "data/raw/"
   dataset_filename: "ai_text_detection_pile.csv"
-  sample_size: 10000  # For development/testing, use a smaller sample
+  sample_size: null  # For development/testing, use a smaller sample
   random_state: 42
 
 # Data Preprocessing Configuration
@@ -150,12 +150,63 @@ environments:
   development:
     data_ingestion:
       sample_size: 1000  # Smaller sample for development
+    inference:
+      device_preference: "mps"
     logging:
       level: "DEBUG"
       rotation:
         backup_count: 3
         retention_days: 7
-
+    # DeBERTa config overrides
+    model_overrides:
+      model_name_or_path: "microsoft/deberta-v3-base"
+    lora_overrides:
+      r: 8
+      lora_alpha: 16
+      bias: "none"
+    tokenizer_overrides:
+      max_length: 128
+    # Training config overrides
+    training_overrides:
+      num_train_epochs: 1
+      per_device_train_batch_size: 1
+      per_device_eval_batch_size: 1
+      gradient_accumulation_steps: 8
+      learning_rate: 2e-5
+      bf16: false
+      dataloader_num_workers: 0
+      gradient_checkpointing: true
+      checkpoint_interval_steps: 50
+      logging_steps: 2
+      report_to: ["tensorboard"]  # ["wandb", "tensorboard"] or null
+      run_name: "deberta-v3-base-finetuning"
+      device_preference: "mps"
+    # Dataset overrides
+    dataset_overrides:
+      max_length: 128
+    # Evaluation overrides
+    evaluation_overrides:
+      eval_steps: 50
+      save_steps: 50
+    # Validation overrides
+    validation_overrides:
+      min_accuracy: 0.75
+      min_f1: 0.75
+      min_precision: 0.60
+      min_recall: 0.60
+      min_auc: 0.75
+      calibration_bins: 10
+      max_prediction_skew: 0.6
+    registration_overrides:
+      use_hf: false
+      hf_repo_id: null
+      hf_token: null
+      push_to_hub: false
+      use_mlflow: false
+      use_sagemaker: false
+      require_validation_pass: false
+      registry_type: "local"
+      local_registry_dir: "artifacts/model_registry/"
   staging:
     data_ingestion:
       sample_size: 50000
@@ -169,6 +220,8 @@ environments:
   production:
     data_ingestion:
       sample_size: null  # Full dataset
+    inference:
+      device_preference: "cuda"
     logging:
       level: "WARNING"
       structured: true
@@ -180,3 +233,49 @@ environments:
     inference:
       log_predictions: false
       enable_monitoring: true
+    # DeBERTa config overrides
+    model_overrides:
+      model_name_or_path: "microsoft/deberta-v3-large"
+      lora:
+        r: 64
+        lora_alpha: 128
+        bias: "all"
+      tokenizer:
+        max_length: 512
+    # Training config overrides
+    training_overrides:
+      num_train_epochs: 3
+      per_device_train_batch_size: 32
+      per_device_eval_batch_size: 32
+      gradient_accumulation_steps: 1
+      learning_rate: 2e-4
+      fp16: true
+      bf16: true
+      dataloader_num_workers: 2
+      gradient_checkpointing: true
+      checkpoint_interval_steps: 250
+      logging_steps: 100
+      report_to: ["tensorboard"]  # ["wandb", "tensorboard"] or null
+      run_name: "deberta-v3-large-finetuning"
+      device_preference: "cuda"
+    # Dataset overrides
+    dataset_overrides:
+      max_length: 512
+    # Evaluation overrides
+    evaluation_overrides:
+      eval_steps: 500
+      save_steps: 500
+    # Validation overrides
+    validation_overrides:
+      min_accuracy: 0.85
+      min_f1: 0.85
+      min_precision: 0.80
+      min_recall: 0.80
+      min_auc: 0.85
+      calibration_bins: 10
+      max_prediction_skew: 0.8
+    registration_overrides:
+      use_hf: true
+      use_mlflow: true
+      use_sagemaker: true
+      registry_type: "hf_hub"

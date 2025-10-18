@@ -131,6 +131,7 @@ validation:
 # Model Registration Configuration
 registration:
   # Hugging Face Hub configuration
+  registry_type: "local"  # local, hf-hub, mlflow, sagemaker
   use_hf: true
   hf_repo_id: null # Set this for your repository
   hf_token: null    # Set via environment variable HF_TOKEN

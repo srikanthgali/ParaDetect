@@ -3,6 +3,10 @@ Model Training Component for ParaDetect
 Handles DeBERTa fine-tuning with LoRA support, checkpointing, and resumption
 """
 
+import logging
+
+for logger_name in ["botocore", "boto3", "urllib3", "s3transfer", "sagemaker"]:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
 import os
 import json
 import shutil
@@ -25,6 +29,7 @@ from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import pandas as pd
+import hashlib
 
 from para_detect.entities.model_training_config import ModelTrainingConfig
 from para_detect.core.exceptions import ModelTrainingError, DeviceError, CheckpointError
@@ -87,14 +92,34 @@ class ModelTrainer:
             "best_metrics": None,
         }
 
-        # Paths
+        # Paths - use shared cache for tokenized data
         self.checkpoint_dir = self.config.output_dir / "checkpoints"
-        self.tokenized_data_dir = self.config.output_dir / "tokenized_data"
         self.logs_dir = self.config.output_dir / "logs"
 
+        # Shared tokenized data cache based on data/model hash
+        self.tokenized_data_cache_dir = self._get_shared_tokenized_cache_dir()
+
         # Create directories
-        for directory in [self.checkpoint_dir, self.tokenized_data_dir, self.logs_dir]:
-            create_directories(directory)
+        for directory in [self.checkpoint_dir, self.logs_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+        self.tokenized_data_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_shared_tokenized_cache_dir(self) -> Path:
+        """Get shared cache directory for tokenized datasets."""
+        # Create hash based on model and tokenization config
+        cache_key_elements = {
+            "model_name": self.config.model_name_or_path,
+            "max_length": self.config.max_length,
+            "text_column": self.config.text_column,
+            "label_column": self.config.label_column,
+        }
+
+        cache_key = json.dumps(cache_key_elements, sort_keys=True)
+        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:12]
+
+        # Shared cache under artifacts
+        cache_dir = Path("artifacts/tokenized_datasets") / f"cache_{cache_hash}"
+        return cache_dir
 
     def _detect_device(self) -> torch.device:
         """Detect optimal device for training."""
@@ -151,28 +176,26 @@ class ModelTrainer:
         try:
             self.logger.info("📊 Preparing datasets...")
 
-            # Check if tokenized datasets already exist
-            cached_train_path = self.tokenized_data_dir / "train"
-            cached_val_path = self.tokenized_data_dir / "validation"
-            cached_test_path = self.tokenized_data_dir / "test"
+            # Check shared tokenized cache
+            cached_train_path = self.tokenized_data_cache_dir / "train"
+            cached_val_path = self.tokenized_data_cache_dir / "validation"
+            cached_test_path = self.tokenized_data_cache_dir / "test"
 
             if (
                 cached_train_path.exists()
                 and cached_val_path.exists()
                 and cached_test_path.exists()
-                and not self._should_retokenize()
+                and not self._should_retokenize(data_path)
             ):
-                self.logger.info("📂 Loading cached tokenized datasets...")
+                self.logger.info("♻️ Reusing cached tokenized datasets")
                 train_dataset = load_from_disk(str(cached_train_path))
                 val_dataset = load_from_disk(str(cached_val_path))
                 test_dataset = load_from_disk(str(cached_test_path))
-
+                self.training_state["tokenization_completed"] = True
                 return DatasetDict(
-                    {
-                        "train": train_dataset,
-                        "validation": val_dataset,
-                        "test": test_dataset,
-                    }
+                    train=train_dataset,
+                    validation=val_dataset,
+                    test=test_dataset,
                 )
 
             # Load raw data
@@ -192,6 +215,26 @@ class ModelTrainer:
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
                 raise ModelTrainingError(f"Missing required columns: {missing_columns}")
+
+            # Sanitize inputs to avoid tokenizer/native crashes
+            df = df[required_columns].dropna()
+            # Ensure text is string
+            df[self.config.text_column] = df[self.config.text_column].astype(str)
+            # Normalize labels to ints if needed
+            if not pd.api.types.is_integer_dtype(df[self.config.label_column]):
+                # Try mapping via LABEL_MAPPING if labels are strings
+                if df[self.config.label_column].dtype == object:
+                    mapped = df[self.config.label_column].map(LABEL_MAPPING)
+                    if mapped.isna().any():
+                        raise ModelTrainingError(
+                            "Label normalization failed: unknown labels present. "
+                            "Ensure labels match keys in LABEL_MAPPING or are integer-encoded."
+                        )
+                    df[self.config.label_column] = mapped.astype(int)
+                else:
+                    df[self.config.label_column] = df[self.config.label_column].astype(
+                        int
+                    )
 
             # Create train/validation/test splits
             train_texts, temp_texts, train_labels, temp_labels = train_test_split(
@@ -230,40 +273,92 @@ class ModelTrainer:
             train_dataset = Dataset.from_dict(
                 {"text": train_texts, "labels": train_labels}
             )
-
             val_dataset = Dataset.from_dict({"text": val_texts, "labels": val_labels})
-
             test_dataset = Dataset.from_dict(
                 {"text": test_texts, "labels": test_labels}
             )
 
-            # Tokenize datasets
-            self.logger.info("🔤 Tokenizing datasets...")
-            train_dataset = train_dataset.map(
-                self._tokenize_function, batched=True, desc="Tokenizing train data"
-            )
+            # Ensure tokenizer is loaded
+            if not self.tokenizer:
+                name_or_path = (
+                    self.config.tokenizer_name_or_path or self.config.model_name_or_path
+                )
+                try:
+                    self.logger.info("🔡 Loading tokenizer (fast)...")
+                    self.tokenizer = AutoTokenizer.from_pretrained(name_or_path)
+                    self.logger.info("✅ Tokenizer loaded")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Fast tokenizer load failed: {e}. Falling back to slow tokenizer (use_fast=False). "
+                        f"If this also fails, install sentencepiece: pip install sentencepiece"
+                    )
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        name_or_path, use_fast=False
+                    )
+                    self.logger.info("✅ Slow tokenizer loaded")
 
-            val_dataset = val_dataset.map(
-                self._tokenize_function, batched=True, desc="Tokenizing validation data"
-            )
-
-            test_dataset = test_dataset.map(
-                self._tokenize_function, batched=True, desc="Tokenizing test data"
-            )
+            # Tokenize datasets (single-process to avoid subprocess crashes on macOS)
+            self.logger.info("🔤 Tokenizing datasets (single process)...")
+            try:
+                train_dataset = train_dataset.map(
+                    self._tokenize_function,
+                    batched=True,
+                    desc="Tokenizing train data",
+                )
+                val_dataset = val_dataset.map(
+                    self._tokenize_function,
+                    batched=True,
+                    desc="Tokenizing validation data",
+                )
+                test_dataset = test_dataset.map(
+                    self._tokenize_function,
+                    batched=True,
+                    desc="Tokenizing test data",
+                )
+            except RuntimeError as e:
+                # Provide clearer guidance if a subprocess-like error still bubbles up
+                if "subprocesses has abruptly died" in str(e):
+                    self.logger.warning(
+                        "Tokenization encountered a multiprocessing crash; retrying strictly in main process."
+                    )
+                    # Retry with explicit no multiprocessing flags (datasets defaults to no MP when num_proc is None)
+                    train_dataset = train_dataset.map(
+                        self._tokenize_function,
+                        batched=True,
+                        num_proc=None,
+                        desc="Tokenizing train data (retry)",
+                    )
+                    val_dataset = val_dataset.map(
+                        self._tokenize_function,
+                        batched=True,
+                        num_proc=None,
+                        desc="Tokenizing validation data (retry)",
+                    )
+                    test_dataset = test_dataset.map(
+                        self._tokenize_function,
+                        batched=True,
+                        num_proc=None,
+                        desc="Tokenizing test data (retry)",
+                    )
+                else:
+                    raise
 
             # Remove text columns (no longer needed)
             train_dataset = train_dataset.remove_columns(["text"])
             val_dataset = val_dataset.remove_columns(["text"])
             test_dataset = test_dataset.remove_columns(["text"])
 
-            # Cache tokenized datasets
+            # Cache tokenized datasets in shared location
             self.logger.info("💾 Caching tokenized datasets...")
             train_dataset.save_to_disk(str(cached_train_path))
             val_dataset.save_to_disk(str(cached_val_path))
             test_dataset.save_to_disk(str(cached_test_path))
 
-            # Save test dataset path for evaluation
-            test_data_path = self.tokenized_data_dir / "test_dataset_path.txt"
+            # Save tokenizer config and data path for cache validation
+            self._save_tokenization_metadata(data_path)
+
+            # Save test dataset path for downstream evaluation
+            test_data_path = self.tokenized_data_cache_dir / "test_dataset_path.txt"
             with open(test_data_path, "w") as f:
                 f.write(str(cached_test_path))
 
@@ -293,27 +388,59 @@ class ModelTrainer:
             return_tensors=None,
         )
 
-    def _should_retokenize(self) -> bool:
+    def _should_retokenize(self, data_path: Optional[str] = None) -> bool:
         """Check if datasets should be retokenized."""
-        # Check if tokenizer has changed
-        tokenizer_config_path = self.tokenized_data_dir / "tokenizer_config.json"
 
-        if not tokenizer_config_path.exists():
+        meta_path = self.tokenized_data_cache_dir / "tokenization_metadata.json"
+
+        if not meta_path.exists():
             return True
 
         try:
-            with open(tokenizer_config_path, "r") as f:
-                saved_config = json.load(f)
-
-            current_config = {
-                "model_name": self.config.model_name_or_path,
-                "max_length": self.config.max_length,
-            }
-
-            return saved_config != current_config
-
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
         except Exception:
             return True
+
+        # Verify core config compatibility
+        if meta.get("model_name") != self.config.model_name_or_path:
+            return True
+        if int(meta.get("max_length", -1)) != int(self.config.max_length):
+            return True
+        if meta.get("text_column") != self.config.text_column:
+            return True
+        if meta.get("label_column") != self.config.label_column:
+            return True
+
+        # If no specific data_path was provided, use config
+        current_data_path = str(data_path or self.config.train_path or "")
+        saved_data_path = str(meta.get("data_path") or "")
+
+        # Data path checks
+        current_data_path = str(data_path or self.config.train_path or "")
+        saved_data_path = str(meta.get("data_path") or "")
+
+        if current_data_path and current_data_path != saved_data_path:
+            self.logger.info(f"🔄 Data path changed; will retokenize.")
+            return True
+
+        # All checks passed — can reuse cache
+        return False
+
+    def _save_tokenization_metadata(self, data_path: Optional[str] = None):
+        """Save metadata for tokenization cache validation."""
+        metadata = {
+            "model_name": self.config.model_name_or_path,
+            "max_length": self.config.max_length,
+            "data_path": str(data_path or self.config.train_path or ""),
+            "text_column": self.config.text_column,
+            "label_column": self.config.label_column,
+            "tokenized_at": datetime.now().isoformat(),
+        }
+
+        metadata_file = self.tokenized_data_cache_dir / "tokenization_metadata.json"
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
 
     def build_model(self) -> AutoModelForSequenceClassification:
         """
@@ -325,22 +452,69 @@ class ModelTrainer:
         try:
             self.logger.info(f"🤖 Loading model: {self.config.model_name_or_path}")
 
-            # Load tokenizer if not provided
+            # Load tokenizer if not provided (fast -> slow fallback already handled above if added)
             if not self.tokenizer:
-                self.tokenizer = AutoTokenizer.from_pretrained(
+                name_or_path = (
                     self.config.tokenizer_name_or_path or self.config.model_name_or_path
                 )
-                self.logger.info("✅ Tokenizer loaded")
+                try:
+                    self.logger.info("🔡 Loading tokenizer (fast)...")
+                    self.tokenizer = AutoTokenizer.from_pretrained(name_or_path)
+                    self.logger.info("✅ Tokenizer loaded")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Fast tokenizer load failed: {e}. Falling back to slow tokenizer (use_fast=False). "
+                        f"If this also fails, install sentencepiece: pip install sentencepiece"
+                    )
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        name_or_path, use_fast=False
+                    )
+                    self.logger.info("✅ Slow tokenizer loaded")
+
+            # Prepare kwargs for model loading
+            extra_kwargs = {
+                "num_labels": len(LABEL_MAPPING),
+                "dtype": torch.float32,  # prefer dtype over deprecated torch_dtype
+                "low_cpu_mem_usage": True,
+                "id2label": REVERSE_LABEL_MAPPING,
+                "label2id": LABEL_MAPPING,
+            }
+
+            # Device map handling:
+            # - On CUDA, allow auto with an offload_folder to satisfy accelerate when it decides to offload.
+            # - On MPS/CPU, ignore 'auto' and load normally (then .to(self.device)).
+            dm = getattr(self.config, "device_map", None)
+            if dm:
+                if dm == "auto":
+                    if self.device.type == "cuda":
+                        offload_dir = self.config.output_dir / "offload"
+                        offload_dir.mkdir(parents=True, exist_ok=True)
+                        extra_kwargs["device_map"] = "auto"
+                        extra_kwargs["offload_folder"] = str(offload_dir)
+                        self.logger.info(
+                            f"🗂️ Using device_map='auto' with offload folder: {offload_dir}"
+                        )
+                    else:
+                        self.logger.info(
+                            "ℹ️ device_map='auto' ignored on non-CUDA device; loading model on host then moving to device."
+                        )
+                else:
+                    extra_kwargs["device_map"] = dm
 
             # Load base model
             model = AutoModelForSequenceClassification.from_pretrained(
                 self.config.model_name_or_path,
-                num_labels=len(LABEL_MAPPING),
-                torch_dtype=torch.float32,
-                device_map=self.config.device_map,
-                id2label=REVERSE_LABEL_MAPPING,
-                label2id=LABEL_MAPPING,
+                **extra_kwargs,
             )
+
+            # Memory: disable cache for training
+            if hasattr(model.config, "use_cache"):
+                model.config.use_cache = False
+
+            # Enable gradient checkpointing if requested
+            if getattr(self.config, "gradient_checkpointing", True):
+                if hasattr(model, "gradient_checkpointing_enable"):
+                    model.gradient_checkpointing_enable()
 
             self.logger.info(
                 f"✅ Base model loaded: {model.num_parameters():,} parameters"
@@ -369,8 +543,41 @@ class ModelTrainer:
             # Get LoRA config
             peft_config = self.config.peft_config or {}
 
+            # Normalize task_type to the TaskType enum
+            task_type_raw = peft_config.get("task_type", TaskType.SEQ_CLS)
+            if isinstance(task_type_raw, str):
+                name = task_type_raw.strip().upper()
+                if name in TaskType.__members__:
+                    task_type_enum = TaskType[name]
+                else:
+                    self.logger.warning(
+                        f"Unknown LoRA task_type '{task_type_raw}', defaulting to SEQ_CLS"
+                    )
+                    task_type_enum = TaskType.SEQ_CLS
+            elif isinstance(task_type_raw, TaskType):
+                task_type_enum = task_type_raw
+            else:
+                self.logger.warning(
+                    f"Unexpected LoRA task_type type: {type(task_type_raw)}, defaulting to SEQ_CLS"
+                )
+                task_type_enum = TaskType.SEQ_CLS
+
+            # Normalize target_modules to a plain list[str]
+            target_modules = (
+                peft_config.get("target_modules") or DEFAULT_LORA_TARGET_MODULES
+            )
+            if isinstance(target_modules, str):
+                target_modules = [target_modules]
+            elif hasattr(target_modules, "__iter__"):
+                try:
+                    target_modules = list(target_modules)
+                except Exception:
+                    target_modules = DEFAULT_LORA_TARGET_MODULES
+            else:
+                target_modules = DEFAULT_LORA_TARGET_MODULES
+
             lora_config = LoraConfig(
-                task_type=peft_config.task_type,
+                task_type=task_type_enum,
                 r=peft_config.r,
                 lora_alpha=peft_config.lora_alpha,
                 lora_dropout=peft_config.lora_dropout,
@@ -388,7 +595,8 @@ class ModelTrainer:
             )
             total_params = sum(p.numel() for p in model.parameters())
 
-            self.logger.info(f"🎯 LoRA Configuration:")
+            self.logger.info("🎯 LoRA Configuration:")
+            self.logger.info(f"   Task type: {task_type_enum.name}")
             self.logger.info(f"   Rank: {lora_config.r}")
             self.logger.info(f"   Alpha: {lora_config.lora_alpha}")
             self.logger.info(f"   Dropout: {lora_config.lora_dropout}")
@@ -398,7 +606,6 @@ class ModelTrainer:
             )
 
             return model
-
         except Exception as e:
             raise ModelTrainingError(f"Failed to apply LoRA: {str(e)}") from e
 
@@ -477,7 +684,7 @@ class ModelTrainer:
                     else None
                 ),
                 "test_dataset_path": str(
-                    self.tokenized_data_dir / "test"
+                    self.tokenized_data_cache_dir / "test"
                 ),  # Path to test set for evaluation
             }
 
@@ -618,7 +825,7 @@ class ModelTrainer:
                 raise ModelTrainingError("No model to save")
 
             # Save model
-            if not self.config.saving.save_model:
+            if not self.config.save_model:
                 self.logger.info("Model saving is disabled in config")
                 return ""
 
@@ -629,12 +836,12 @@ class ModelTrainer:
             self.logger.info(f"✅ Model saved to: {final_model_dir}")
 
             # Save tokenizer
-            if self.config.saving.save_tokenizer and self.tokenizer:
+            if self.config.save_tokenizer and self.tokenizer:
                 self.tokenizer.save_pretrained(str(final_model_dir))
                 self.logger.info(f"✅ Tokenizer saved to: {final_model_dir}")
 
             # Save metadata
-            if self.config.saving.save_metadata:
+            if self.config.save_metadata:
                 metadata = {
                     "model_name": self.config.model_name_or_path,
                     "training_config": {

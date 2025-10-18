@@ -82,6 +82,16 @@ class ModelValidator:
             self.validation_issues = []
             self.validation_warnings = []
 
+            # Coerce to numpy + 1D probs
+            predictions = np.asarray(predictions)
+            true_labels = np.asarray(true_labels)
+            if probabilities is not None:
+                probabilities = np.asarray(probabilities)
+                if probabilities.ndim == 2 and probabilities.shape[1] >= 2:
+                    probabilities = probabilities[:, 1]
+                elif probabilities.ndim > 1:
+                    probabilities = probabilities.reshape(-1)
+
             # Basic data validation
             self._validate_input_data(predictions, true_labels, probabilities)
 
@@ -176,10 +186,17 @@ class ModelValidator:
                 "Predictions and true labels have different lengths"
             )
 
-        if probabilities is not None and len(probabilities) != len(predictions):
-            raise ModelValidationError(
-                "Probabilities and predictions have different lengths"
-            )
+        if probabilities is not None:
+            if len(probabilities) != len(predictions):
+                raise ModelValidationError(
+                    "Probabilities and predictions have different lengths"
+                )
+            if np.any(probabilities < 0) or np.any(probabilities > 1):
+                raise ModelValidationError("Probabilities must be in [0, 1]")
+            if len(probabilities) == 0:
+                raise ModelValidationError(
+                    "Probabilities are empty; cannot run calibration metrics"
+                )
 
         # Check label values
         unique_labels = np.unique(true_labels)
@@ -265,20 +282,23 @@ class ModelValidator:
 
         for metric_name, min_threshold in thresholds.items():
             if metric_name in metrics:
-                actual_value = metrics[metric_name]
-                passed = actual_value >= min_threshold
+                actual_value = float(metrics[metric_name])  # Ensure it's a Python float
+                passed = not (np.isnan(actual_value) or actual_value < min_threshold)
 
                 threshold_results["details"][metric_name] = {
                     "actual": actual_value,
-                    "required": min_threshold,
+                    "minimum": min_threshold,
                     "passed": passed,
                 }
 
                 if not passed:
+                    if np.isnan(actual_value):
+                        issue = f"{metric_name.title()} is NaN (invalid)"
+                    else:
+                        issue = f"{metric_name.title()} {actual_value:.3f} below minimum {min_threshold:.3f}"
+
+                    self.validation_issues.append(issue)
                     threshold_results["passed"] = False
-                    self.validation_issues.append(
-                        f"{metric_name.title()} {actual_value:.3f} below threshold {min_threshold:.3f}"
-                    )
 
         return threshold_results
 
@@ -562,40 +582,90 @@ class ModelValidator:
             else:
                 return f"Model has {len(self.validation_issues)} critical issues. Address all issues before proceeding with registration."
 
+    def _convert_to_serializable(self, obj: Any) -> Any:
+        """Convert numpy types and other non-serializable types to JSON-serializable formats."""
+        if isinstance(obj, dict):
+            return {
+                key: self._convert_to_serializable(value) for key, value in obj.items()
+            }
+        elif isinstance(obj, (list, tuple)):
+            return [self._convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return self._convert_to_serializable(obj.tolist())
+        elif hasattr(obj, "__dict__"):
+            # Handle custom objects
+            return self._convert_to_serializable(obj.__dict__)
+        else:
+            return obj
+
     def _save_validation_report(self) -> None:
         """Save detailed validation report."""
         try:
             report_path = self.config.validation_output_dir / "validation_report.json"
 
+            # Convert to serializable format
+            serializable_results = self._convert_to_serializable(
+                self.validation_results
+            )
+
             with open(report_path, "w") as f:
-                json.dump(self.validation_results, f, indent=2)
+                json.dump(serializable_results, f, indent=2, default=str)
 
             # Also save a human-readable summary
             summary_path = self.config.validation_output_dir / "validation_summary.txt"
             with open(summary_path, "w") as f:
-                f.write("Model Validation Report\n")
-                f.write("=" * 50 + "\n\n")
+                f.write("=" * 60 + "\n")
+                f.write("MODEL VALIDATION REPORT\n")
+                f.write("=" * 60 + "\n\n")
                 f.write(
-                    f"Validation Status: {'PASSED' if self.validation_passed else 'FAILED'}\n"
+                    f"Timestamp: {self.validation_results.get('validation_timestamp', 'Unknown')}\n"
                 )
                 f.write(
-                    f"Timestamp: {self.validation_results['validation_timestamp']}\n\n"
+                    f"Overall Status: {'PASSED' if self.validation_results.get('validation_passed', False) else 'FAILED'}\n\n"
                 )
 
+                # Metrics summary
+                f.write("METRICS SUMMARY:\n")
+                f.write("-" * 30 + "\n")
+                metrics = self.validation_results.get("metrics", {})
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        f.write(f"{key}: {value:.4f}\n")
+                    else:
+                        f.write(f"{key}: {value}\n")
+
+                f.write(f"\nVALIDATION CHECKS:\n")
+                f.write("-" * 30 + "\n")
+                checks = self.validation_results.get("validation_checks", {})
+                for check_name, check_result in checks.items():
+                    status = "PASSED" if check_result.get("passed", False) else "FAILED"
+                    if check_result.get("skipped", False):
+                        status = "SKIPPED"
+                    f.write(f"{check_name}: {status}\n")
+
+                # Issues and warnings
                 if self.validation_issues:
-                    f.write("Critical Issues:\n")
+                    f.write(f"\nISSUES:\n")
+                    f.write("-" * 30 + "\n")
                     for issue in self.validation_issues:
-                        f.write(f"  - {issue}\n")
-                    f.write("\n")
+                        f.write(f"- {issue}\n")
 
                 if self.validation_warnings:
-                    f.write("Warnings:\n")
+                    f.write(f"\nWARNINGS:\n")
+                    f.write("-" * 30 + "\n")
                     for warning in self.validation_warnings:
-                        f.write(f"  - {warning}\n")
-                    f.write("\n")
+                        f.write(f"- {warning}\n")
 
+                f.write(f"\nRECOMMENDATION:\n")
+                f.write("-" * 30 + "\n")
                 f.write(
-                    f"Recommendation: {self.validation_results['recommendation']}\n"
+                    f"{self.validation_results.get('recommendation', 'No recommendation available')}\n"
                 )
 
             self.logger.info(f"📋 Validation report saved: {report_path}")

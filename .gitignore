@@ -194,6 +194,9 @@ outputs/
 runs/
 results/
 experiments/
+artifacts/checkpoints/*
+artifacts/models/*
+artifacts/tokenized_datasets/*
 
 # WandB files
 wandb/

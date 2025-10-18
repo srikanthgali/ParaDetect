@@ -17,6 +17,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from peft import TaskType
 from para_detect.constants import *
 from para_detect.core.exceptions import ConfigurationError
 from para_detect.utils.helpers import read_yaml
@@ -29,9 +30,12 @@ class ConfigurationManager:
     def __init__(self, base_config_file_path=BASE_CONFIG_FILE_PATH):
         self.base_config = read_yaml(base_config_file_path)
         self.environment = self._get_environment()
-        self._apply_environment_overrides()
+
         # Load additional configuration files
         self._load_additional_configs()
+
+        # Apply environment overrides to ALL configurations
+        self._apply_comprehensive_environment_overrides()
 
     def _get_environment(self) -> str:
         """Get current environment from config or environment variable"""
@@ -41,32 +45,131 @@ class ConfigurationManager:
             or "development"
         )
 
-    def _apply_environment_overrides(self):
-        """Apply environment-specific configuration overrides with deep merge support"""
-        if (
+    def _apply_comprehensive_environment_overrides(self):
+        """Apply environment-specific overrides to all configuration files"""
+        if not (
             hasattr(self.base_config, "environments")
             and self.environment in self.base_config.environments
         ):
-            env_config = self.base_config.environments[self.environment]
+            return
 
-            # Deep merge environment overrides
-            for section, values in env_config.items():
-                if section in self.base_config:
-                    if isinstance(values, dict):
-                        # Handle nested configurations like logging.rotation
-                        current_section = self.base_config[section]
-                        if isinstance(current_section, dict):
-                            # Deep merge for nested dictionaries
-                            self._deep_merge_dict(current_section, values)
-                        else:
-                            # Replace if not a dict
-                            self.base_config[section] = values
+        env_config = self.base_config.environments[self.environment]
+
+        # Apply base config overrides (existing functionality)
+        self._apply_base_config_overrides(env_config)
+
+        # Apply training config overrides
+        self._apply_training_config_overrides(env_config)
+
+        # Apply model config overrides
+        self._apply_model_config_overrides(env_config)
+
+        # Apply deployment config overrides
+        self._apply_deployment_config_overrides(env_config)
+
+    def _apply_base_config_overrides(self, env_config):
+        """Apply overrides to base config (existing logic)"""
+        for section, values in env_config.items():
+            # Skip override sections for other configs
+            if section.endswith("_overrides"):
+                continue
+
+            if section in self.base_config:
+                if isinstance(values, dict):
+                    current_section = self.base_config[section]
+                    if isinstance(current_section, dict):
+                        self._deep_merge_dict(current_section, values)
                     else:
-                        # Replace primitive values
                         self.base_config[section] = values
                 else:
-                    # Add new sections
                     self.base_config[section] = values
+            else:
+                self.base_config[section] = values
+
+    def _apply_training_config_overrides(self, env_config):
+        """Apply environment-specific overrides to training config"""
+        training_overrides = env_config.get("training_overrides", {})
+        if not training_overrides:
+            return
+
+        # Apply to training section
+        if hasattr(self.training_config, "training"):
+            self._deep_merge_dict(self.training_config.training, training_overrides)
+        else:
+            self.training_config.training = ConfigBox(training_overrides)
+
+        # Apply evaluation overrides
+        evaluation_overrides = env_config.get("evaluation_overrides", {})
+        if evaluation_overrides:
+            if hasattr(self.training_config, "evaluation"):
+                self._deep_merge_dict(
+                    self.training_config.evaluation, evaluation_overrides
+                )
+            else:
+                self.training_config.evaluation = ConfigBox(evaluation_overrides)
+
+        # Apply dataset overrides
+        dataset_overrides = env_config.get("dataset_overrides", {})
+        if dataset_overrides:
+            if hasattr(self.training_config, "dataset"):
+                self._deep_merge_dict(self.training_config.dataset, dataset_overrides)
+            else:
+                self.training_config.dataset = ConfigBox(dataset_overrides)
+
+        # Apply validation overrides
+        validation_overrides = env_config.get("validation_overrides", {})
+        if validation_overrides:
+            if hasattr(self.training_config, "validation"):
+                self._deep_merge_dict(
+                    self.training_config.validation, validation_overrides
+                )
+            else:
+                self.training_config.validation = ConfigBox(validation_overrides)
+
+        # Apply registration overrides
+        registration_overrides = env_config.get("registration_overrides", {})
+        if registration_overrides:
+            if hasattr(self.training_config, "registration"):
+                self._deep_merge_dict(
+                    self.training_config.registration, registration_overrides
+                )
+            else:
+                self.training_config.registration = ConfigBox(registration_overrides)
+
+    def _apply_model_config_overrides(self, env_config):
+        """Apply environment-specific overrides to model config"""
+
+        # Apply model overrides
+        model_overrides = env_config.get("model_overrides", {})
+        if model_overrides:
+            if hasattr(self.deberta_config, "model"):
+                self._deep_merge_dict(self.deberta_config.model, model_overrides)
+            else:
+                self.deberta_config.model = ConfigBox(model_overrides)
+
+        # Apply lora overrides
+        lora_overrides = env_config.get("lora_overrides", {})
+        if lora_overrides:
+            if hasattr(self.deberta_config, "lora"):
+                self._deep_merge_dict(self.deberta_config.lora, lora_overrides)
+            else:
+                self.deberta_config.lora = ConfigBox(lora_overrides)
+
+        # Apply tokenizer overrides
+        tokenizer_overrides = env_config.get("tokenizer_overrides", {})
+        if tokenizer_overrides:
+            if hasattr(self.deberta_config, "tokenizer"):
+                self._deep_merge_dict(
+                    self.deberta_config.tokenizer, tokenizer_overrides
+                )
+            else:
+                self.deberta_config.tokenizer = ConfigBox(tokenizer_overrides)
+
+    def _apply_deployment_config_overrides(self, env_config):
+        """Apply environment-specific overrides to deployment config"""
+        deployment_overrides = env_config.get("deployment_overrides", {})
+        if deployment_overrides:
+            self._deep_merge_dict(self.deployment_config, deployment_overrides)
 
     def _deep_merge_dict(self, target: dict, source: dict):
         """Recursively merge source dict into target dict"""
@@ -233,10 +336,10 @@ class ConfigurationManager:
                 artifacts_dir=Path(pipeline_config.artifacts_dir),
                 checkpoints_dir=Path(pipeline_config.checkpoints_dir),
                 state_files=state_files,
-                enable_state_persistence=pipeline_config.enable_state_persistence,
-                state_auto_save=pipeline_config.state_auto_save,
-                state_retention_days=pipeline_config.state_retention_days,
-                enable_pipeline_locks=pipeline_config.enable_pipeline_locks,
+                enable_state_persistence=bool(pipeline_config.enable_state_persistence),
+                state_auto_save=bool(pipeline_config.state_auto_save),
+                state_retention_days=int(pipeline_config.state_retention_days),
+                enable_pipeline_locks=bool(pipeline_config.enable_pipeline_locks),
             )
 
         except Exception as e:
@@ -301,8 +404,12 @@ class ConfigurationManager:
                 source_type=ingestion_config.source_type,
                 raw_data_dir=Path(ingestion_config.raw_data_dir),
                 dataset_filename=ingestion_config.dataset_filename,
-                sample_size=ingestion_config.sample_size,
-                random_state=ingestion_config.random_state,
+                sample_size=(
+                    int(ingestion_config.sample_size)
+                    if ingestion_config.sample_size is not None
+                    else None
+                ),
+                random_state=int(ingestion_config.random_state),
             )
 
         except Exception as e:
@@ -319,16 +426,16 @@ class ConfigurationManager:
                 text_column=preprocessing_config.text_column,
                 label_column=preprocessing_config.label_column,
                 source_column=preprocessing_config.source_column,
-                remove_duplicates=preprocessing_config.remove_duplicates,
-                min_text_length=preprocessing_config.min_text_length,
-                max_text_length=preprocessing_config.max_text_length,
-                lowercase=preprocessing_config.lowercase,
-                strip_whitespace=preprocessing_config.strip_whitespace,
-                remove_special_chars=preprocessing_config.remove_special_chars,
-                balance_classes=preprocessing_config.balance_classes,
+                remove_duplicates=bool(preprocessing_config.remove_duplicates),
+                min_text_length=int(preprocessing_config.min_text_length),
+                max_text_length=int(preprocessing_config.max_text_length),
+                lowercase=bool(preprocessing_config.lowercase),
+                strip_whitespace=bool(preprocessing_config.strip_whitespace),
+                remove_special_chars=bool(preprocessing_config.remove_special_chars),
+                balance_classes=bool(preprocessing_config.balance_classes),
                 processed_data_dir=Path(preprocessing_config.processed_data_dir),
                 processed_filename=preprocessing_config.processed_filename,
-                random_state=preprocessing_config.random_state,
+                random_state=int(preprocessing_config.random_state),
             )
 
         except Exception as e:
@@ -346,11 +453,11 @@ class ConfigurationManager:
                 required_columns=validation_config.required_columns,
                 text_column=validation_config.text_column,
                 label_column=validation_config.label_column,
-                min_text_length=validation_config.min_text_length,
-                max_text_length=validation_config.max_text_length,
+                min_text_length=int(validation_config.min_text_length),
+                max_text_length=int(validation_config.max_text_length),
                 expected_labels=validation_config.expected_labels,
-                min_samples_per_class=validation_config.min_samples_per_class,
-                max_null_percentage=validation_config.max_null_percentage,
+                min_samples_per_class=int(validation_config.min_samples_per_class),
+                max_null_percentage=float(validation_config.max_null_percentage),
                 validation_report_dir=Path(validation_config.validation_report_dir),
                 report_filename=validation_config.report_filename,
             )
@@ -364,77 +471,136 @@ class ConfigurationManager:
     def get_model_training_config(self) -> ModelTrainingConfig:
         """Get model training configuration"""
         try:
-            training_config = self.training_config.training
-            model_config = self.deberta_config.model
-            dataset_config = self.training_config.dataset
+            from peft import TaskType
+
+            # Check if training_config is loaded and has the required sections
+            if not hasattr(self, "training_config") or not self.training_config:
+                raise ConfigurationError("training_config not loaded properly")
+
+            # Check for required sections with fallbacks
+            training_config = getattr(self.training_config, "training", ConfigBox({}))
+            evaluation_config = getattr(
+                self.training_config, "evaluation", ConfigBox({})
+            )
+            dataset_config = getattr(self.training_config, "dataset", ConfigBox({}))
+
+            if not hasattr(self, "deberta_config") or not self.deberta_config:
+                raise ConfigurationError("deberta_config not loaded properly")
+
+            model_config = getattr(self.deberta_config, "model", ConfigBox({}))
+
+            # Handle PEFT config
             peft_config = None
-            if training_config.use_peft:
+            if bool(training_config.use_peft):
                 lora_config = getattr(self.deberta_config, "lora", ConfigBox({}))
                 if lora_config:
-                    peft_config = {
-                        "task_type": lora_config.task_type,
-                        "r": lora_config.r,
-                        "lora_alpha": lora_config.lora_alpha,
-                        "lora_dropout": lora_config.lora_dropout,
-                        "bias": lora_config.bias,
-                        "target_modules": lora_config.target_modules
-                        or DEFAULT_LORA_TARGET_MODULES,
-                        "inference_mode": lora_config.inference_mode,
-                    }
+                    try:
+                        from peft import TaskType
+
+                        # Convert string task_type to TaskType enum
+                        task_type_str = lora_config.task_type
+                        if task_type_str == "SEQ_CLS":
+                            task_type = TaskType.SEQ_CLS
+                        elif task_type_str == "CAUSAL_LM":
+                            task_type = TaskType.CAUSAL_LM
+                        elif task_type_str == "TOKEN_CLS":
+                            task_type = TaskType.TOKEN_CLS
+                        else:
+                            # Default fallback
+                            task_type = TaskType.SEQ_CLS
+
+                    except ImportError as e:
+                        print(f"ERROR: Could not import TaskType: {e}")
+                        raise ConfigurationError(f"Failed to import TaskType: {e}")
+
+                    # Convert BoxList to regular list for target_modules
+                    target_modules = (
+                        lora_config.target_modules or DEFAULT_LORA_TARGET_MODULES
+                    )
+                    if hasattr(target_modules, "__iter__") and not isinstance(
+                        target_modules, str
+                    ):
+                        target_modules = list(target_modules)  # Convert BoxList to list
+
+                    peft_config = ConfigBox(
+                        {
+                            "task_type": task_type,
+                            "r": int(lora_config.r),
+                            "lora_alpha": int(lora_config.lora_alpha),
+                            "lora_dropout": float(lora_config.lora_dropout),
+                            "bias": lora_config.bias,
+                            "target_modules": target_modules,  # Now guaranteed to be a regular list
+                            "inference_mode": bool(lora_config.inference_mode),
+                        }
+                    )
+
             return ModelTrainingConfig(
                 model_name_or_path=model_config.model_name_or_path,
                 tokenizer_name_or_path=model_config.tokenizer_name_or_path
                 or model_config.model_name_or_path,
-                num_labels=model_config.num_labels,
+                num_labels=int(model_config.num_labels),
                 output_dir=Path(training_config.output_dir),
-                num_train_epochs=training_config.num_train_epochs,
-                per_device_train_batch_size=training_config.per_device_train_batch_size,
-                per_device_eval_batch_size=training_config.per_device_eval_batch_size,
-                gradient_accumulation_steps=training_config.gradient_accumulation_steps,
-                learning_rate=training_config.learning_rate,
-                weight_decay=training_config.weight_decay,
-                warmup_steps=training_config.warmup_steps,
-                warmup_ratio=training_config.warmup_ratio,
-                max_grad_norm=training_config.max_grad_norm,
-                fp16=training_config.fp16,
-                bf16=training_config.bf16,
-                max_length=dataset_config.max_length,
+                num_train_epochs=int(training_config.num_train_epochs),
+                per_device_train_batch_size=int(
+                    training_config.per_device_train_batch_size
+                ),
+                per_device_eval_batch_size=int(
+                    training_config.per_device_eval_batch_size
+                ),
+                gradient_accumulation_steps=int(
+                    training_config.gradient_accumulation_steps
+                ),
+                learning_rate=float(training_config.learning_rate),
+                weight_decay=float(training_config.weight_decay),
+                warmup_steps=int(training_config.warmup_steps),
+                warmup_ratio=float(training_config.warmup_ratio),
+                max_grad_norm=float(training_config.max_grad_norm),
+                fp16=bool(training_config.fp16),
+                bf16=bool(training_config.bf16),
+                max_length=int(dataset_config.max_length),
                 text_column=dataset_config.text_column,
                 label_column=dataset_config.label_column,
                 train_path=dataset_config.train_path,
-                validation_split=dataset_config.validation_split,
-                test_split=dataset_config.test_split,
-                eval_strategy=training_config.evaluation.eval_strategy,
-                eval_steps=training_config.evaluation.eval_steps,
-                save_strategy=training_config.evaluation.save_strategy,
-                save_steps=training_config.evaluation.save_steps,
-                save_total_limit=training_config.evaluation.save_total_limit,
-                load_best_model_at_end=training_config.evaluation.load_best_model_at_end,
-                metric_for_best_model=training_config.evaluation.metric_for_best_model,
-                greater_is_better=training_config.evaluation.greater_is_better,
-                early_stopping_patience=training_config.evaluation.early_stopping_patience,
-                early_stopping_threshold=training_config.evaluation.early_stopping_threshold,
-                resume_from_checkpoint=training_config.resume_from_checkpoint,
-                checkpoint_interval_steps=training_config.checkpoint_interval_steps,
-                use_peft=training_config.use_peft,
-                peft_config=peft_config,
-                logging_steps=training_config.logging_steps,
+                validation_split=float(dataset_config.validation_split),
+                test_split=float(dataset_config.test_split),
+                eval_strategy=evaluation_config.eval_strategy,
+                eval_steps=int(evaluation_config.eval_steps),
+                save_strategy=evaluation_config.save_strategy,
+                save_steps=int(evaluation_config.save_steps),
+                save_total_limit=int(evaluation_config.save_total_limit),
+                load_best_model_at_end=bool(evaluation_config.load_best_model_at_end),
+                metric_for_best_model=evaluation_config.metric_for_best_model,
+                greater_is_better=bool(evaluation_config.greater_is_better),
+                early_stopping_patience=int(evaluation_config.early_stopping_patience),
+                early_stopping_threshold=float(
+                    evaluation_config.early_stopping_threshold
+                ),
+                resume_from_checkpoint=bool(training_config.resume_from_checkpoint),
+                checkpoint_interval_steps=int(
+                    training_config.checkpoint_interval_steps
+                ),
+                use_peft=bool(training_config.use_peft),
+                peft_config=peft_config,  # Now this is a ConfigBox, not a dict
+                logging_steps=int(training_config.logging_steps),
                 report_to=training_config.report_to,
                 run_name=training_config.run_name,
-                seed=training_config.seed,
+                seed=int(training_config.seed),
                 device_preference=training_config.device_preference,
                 device_map=model_config.loading.device_map,
                 torch_dtype_loading=model_config.loading.torch_dtype_loading,
-                low_cpu_mem_usage=model_config.loading.low_cpu_mem_usage,
-                trust_remote_code=model_config.loading.trust_remote_code,
-                save_model=model_config.saving.save_model,
+                low_cpu_mem_usage=bool(model_config.loading.low_cpu_mem_usage),
+                trust_remote_code=bool(model_config.loading.trust_remote_code),
+                save_model=bool(model_config.saving.save_model),
                 torch_dtype_saving=model_config.saving.torch_dtype_saving,
-                safe_serialization=model_config.saving.safe_serialization,
-                save_metadata=model_config.saving.save_metadata,
-                save_config=model_config.saving.save_config,
-                save_tokenizer=model_config.saving.save_tokenizer,
-                create_model_card=model_config.saving.create_model_card,
-                save_training_args=model_config.saving.save_training_args,
+                safe_serialization=bool(model_config.saving.safe_serialization),
+                save_metadata=bool(model_config.saving.save_metadata),
+                save_config=bool(model_config.saving.save_config),
+                save_tokenizer=bool(model_config.saving.save_tokenizer),
+                create_model_card=bool(model_config.saving.create_model_card),
+                save_training_args=bool(model_config.saving.save_training_args),
+                dataloader_num_workers=int(training_config.dataloader_num_workers),
+                dataloader_pin_memory=bool(training_config.dataloader_pin_memory),
+                remove_unused_columns=bool(training_config.remove_unused_columns),
             )
 
         except Exception as e:
@@ -445,21 +611,30 @@ class ConfigurationManager:
     def get_model_evaluation_config(self) -> ModelEvaluationConfig:
         """Get model evaluation configuration"""
         try:
-            eval_config = self.training_config.evaluation
+            # Check if training_config is loaded and has the required sections
+            if not hasattr(self, "training_config") or not self.training_config:
+                raise ConfigurationError("training_config not loaded properly")
+
+            eval_config = getattr(self.training_config, "evaluation", ConfigBox({}))
+            dataset_config = getattr(self.training_config, "dataset", ConfigBox({}))
 
             return ModelEvaluationConfig(
                 metrics=eval_config.metrics,
                 save_best_by=eval_config.save_best_by,
-                eval_batch_size=eval_config.eval_batch_size,
-                max_length=dataset_config.max_length,
+                eval_batch_size=int(eval_config.eval_batch_size),
+                max_length=int(dataset_config.max_length),
                 evaluation_output_dir=Path(eval_config.evaluation_output_dir),
-                save_confusion_matrix=eval_config.save_confusion_matrix,
-                save_classification_report=eval_config.save_classification_report,
-                save_roc_curve=eval_config.save_roc_curve,
-                save_precision_recall_curve=eval_config.save_precision_recall_curve,
-                perform_calibration_analysis=eval_config.perform_calibration_analysis,
-                calibration_bins=eval_config.calibration_bins,
-                compute_per_class_metrics=eval_config.compute_per_class_metrics,
+                save_confusion_matrix=bool(eval_config.save_confusion_matrix),
+                save_classification_report=bool(eval_config.save_classification_report),
+                save_roc_curve=bool(eval_config.save_roc_curve),
+                save_precision_recall_curve=bool(
+                    eval_config.save_precision_recall_curve
+                ),
+                perform_calibration_analysis=bool(
+                    eval_config.perform_calibration_analysis
+                ),
+                calibration_bins=int(eval_config.calibration_bins),
+                compute_per_class_metrics=bool(eval_config.compute_per_class_metrics),
                 device_preference=eval_config.device_preference,
                 text_column=dataset_config.text_column,
                 label_column=dataset_config.label_column,
@@ -475,24 +650,32 @@ class ConfigurationManager:
         try:
             validation_config = self.training_config.validation
             return ModelValidationConfig(
-                min_accuracy=validation_config.min_accuracy,
-                min_f1=validation_config.min_f1,
-                min_precision=validation_config.min_precision,
-                min_recall=validation_config.min_recall,
-                min_auc=validation_config.min_auc,
-                max_brier_score=validation_config.max_brier_score,
-                max_ece=validation_config.max_ece,
-                calibration_bins=validation_config.calibration_bins,
-                min_per_class_f1=validation_config.min_per_class_f1,
-                max_class_imbalance_ratio=validation_config.max_class_imbalance_ratio,
-                perform_fairness_checks=validation_config.perform_fairness_checks,
-                max_demographic_parity_diff=validation_config.max_demographic_parity_diff,
-                max_equalized_odds_diff=validation_config.max_equalized_odds_diff,
-                check_prediction_distribution=validation_config.check_prediction_distribution,
-                max_prediction_skew=validation_config.max_prediction_skew,
+                min_accuracy=float(validation_config.min_accuracy),
+                min_f1=float(validation_config.min_f1),
+                min_precision=float(validation_config.min_precision),
+                min_recall=float(validation_config.min_recall),
+                min_auc=float(validation_config.min_auc),
+                max_brier_score=float(validation_config.max_brier_score),
+                max_ece=float(validation_config.max_ece),
+                calibration_bins=int(validation_config.calibration_bins),
+                min_per_class_f1=float(validation_config.min_per_class_f1),
+                max_class_imbalance_ratio=float(
+                    validation_config.max_class_imbalance_ratio
+                ),
+                perform_fairness_checks=bool(validation_config.perform_fairness_checks),
+                max_demographic_parity_diff=float(
+                    validation_config.max_demographic_parity_diff
+                ),
+                max_equalized_odds_diff=float(
+                    validation_config.max_equalized_odds_diff
+                ),
+                check_prediction_distribution=bool(
+                    validation_config.check_prediction_distribution
+                ),
+                max_prediction_skew=float(validation_config.max_prediction_skew),
                 allowed_label_values=validation_config.allowed_label_values,
                 validation_output_dir=Path(validation_config.validation_output_dir),
-                save_validation_report=validation_config.save_validation_report,
+                save_validation_report=bool(validation_config.save_validation_report),
             )
 
         except Exception as e:
@@ -505,17 +688,18 @@ class ConfigurationManager:
         try:
             registration_config = self.training_config.registration
             return ModelRegistrationConfig(
-                use_hf=registration_config.use_hf,
+                registry_type=registration_config.registry_type,
+                use_hf=bool(registration_config.use_hf),
                 hf_repo_id=registration_config.hf_repo_id,
                 hf_token=registration_config.hf_token,
-                push_to_hub=registration_config.push_to_hub,
-                private_repo=registration_config.private_repo,
-                use_mlflow=registration_config.use_mlflow,
+                push_to_hub=bool(registration_config.push_to_hub),
+                private_repo=bool(registration_config.private_repo),
+                use_mlflow=bool(registration_config.use_mlflow),
                 mlflow_tracking_uri=registration_config.mlflow_tracking_uri,
                 mlflow_experiment_name=registration_config.mlflow_experiment_name,
                 mlflow_model_name=registration_config.mlflow_model_name,
                 mlflow_stage=registration_config.mlflow_stage,
-                use_sagemaker=registration_config.use_sagemaker,
+                use_sagemaker=bool(registration_config.use_sagemaker),
                 sagemaker_role=registration_config.sagemaker_role,
                 sagemaker_bucket=registration_config.sagemaker_bucket,
                 sagemaker_model_name=registration_config.sagemaker_model_name,
@@ -523,10 +707,12 @@ class ConfigurationManager:
                 model_description=registration_config.model_description,
                 model_tags=registration_config.model_tags,
                 license=registration_config.license,
-                require_validation_pass=registration_config.require_validation_pass,
-                dry_run=registration_config.dry_run,
-                force_overwrite=registration_config.force_overwrite,
-                generate_model_card=registration_config.generate_model_card,
+                require_validation_pass=bool(
+                    registration_config.require_validation_pass
+                ),
+                dry_run=bool(registration_config.dry_run),
+                force_overwrite=bool(registration_config.force_overwrite),
+                generate_model_card=bool(registration_config.generate_model_card),
                 model_card_template=registration_config.model_card_template,
             )
 
@@ -543,19 +729,19 @@ class ConfigurationManager:
                 model_path=inference_config.model_path,
                 tokenizer_path=inference_config.tokenizer_path,
                 device_preference=inference_config.device_preference,
-                batch_size=inference_config.batch_size,
-                max_length=inference_config.max_length,
+                batch_size=int(inference_config.batch_size),
+                max_length=int(inference_config.max_length),
                 text_column=inference_config.text_column,
-                preprocessing_enabled=inference_config.preprocessing_enabled,
-                include_probabilities=inference_config.include_probabilities,
-                include_confidence=inference_config.include_confidence,
-                confidence_threshold=inference_config.confidence_threshold,
-                enable_monitoring=inference_config.enable_monitoring,
-                log_predictions=inference_config.log_predictions,
-                chunk_size=inference_config.chunk_size,
-                progress_bar=inference_config.progress_bar,
-                skip_errors=inference_config.skip_errors,
-                max_retries=inference_config.max_retries,
+                preprocessing_enabled=bool(inference_config.preprocessing_enabled),
+                include_probabilities=bool(inference_config.include_probabilities),
+                include_confidence=bool(inference_config.include_confidence),
+                confidence_threshold=float(inference_config.confidence_threshold),
+                enable_monitoring=bool(inference_config.enable_monitoring),
+                log_predictions=bool(inference_config.log_predictions),
+                chunk_size=int(inference_config.chunk_size),
+                progress_bar=bool(inference_config.progress_bar),
+                skip_errors=bool(inference_config.skip_errors),
+                max_retries=int(inference_config.max_retries),
             )
 
         except Exception as e:

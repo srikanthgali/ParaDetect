@@ -4,11 +4,12 @@ Orchestrates: Data Pipeline + Model Training + Evaluation + Validation + Registr
 """
 
 import argparse
-import sys
 import json
+import hashlib
+import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from para_detect.core.base_pipeline import BasePipeline
 from para_detect.core.config_manager import ConfigurationManager
@@ -34,9 +35,10 @@ class TrainingPipeline(BasePipeline):
     5. Model Registration (HuggingFace Hub, MLflow, local registry)
 
     Features:
-    - Checkpoint resumption for interrupted runs
-    - Comprehensive state management
-    - Artifact tracking and metadata preservation
+    - Simple timestamp-based run IDs
+    - Automatic resumption of incomplete runs
+    - State-driven pipeline execution
+    - Clean artifact management
     - Configurable validation gates
     - Multi-registry model publication
     """
@@ -44,29 +46,262 @@ class TrainingPipeline(BasePipeline):
     def __init__(
         self,
         config_manager: Optional[ConfigurationManager] = None,
-        run_id: Optional[str] = None,
+        force_new_run: bool = False,
+        dry_run: bool = False,
     ):
         """
         Initialize training pipeline.
 
         Args:
             config_manager: Configuration manager instance
-            run_id: Optional run identifier for tracking
+            force_new_run: Force new run (don't resume incomplete)
+            dry_run: Skip model registration step
         """
-        super().__init__(PipelineType.TRAINING, config_manager)
+        # Initialize config manager first
+        self.config_manager = config_manager or ConfigurationManager()
 
-        self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Store dry_run parameter
+        self.dry_run = dry_run
+
+        # Generate run ID
+        self.run_id = self._generate_run_id()
+
+        # Initialize base pipeline
+        super().__init__(PipelineType.TRAINING, self.config_manager)
         self.logger = get_logger(self.__class__.__name__)
 
-        # Initialize components
-        self.data_pipeline = DataPipeline(self.config_manager)
+        # Determine resumption strategy
+        self.resume_info = self._determine_resumption_strategy(force_new_run)
+
+        # Set up directories and state
+        self._setup_directories()
+        self.training_artifacts = self._initialize_artifacts()
+
+        # Initialize components (lazy loading)
+        self.data_pipeline = None
         self.model_trainer = None
         self.model_evaluator = None
         self.model_validator = None
         self.model_registrar = None
 
-        # Artifacts tracking
-        self.training_artifacts = {
+        self.logger.info(f"🔧 Training Pipeline - {self.resume_info['status']}")
+        self.logger.info(f"📁 Working directory: {self.run_dir}")
+
+    def _generate_run_id(self) -> str:
+        """Generate simple timestamp-based run ID."""
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _determine_resumption_strategy(self, force_new_run: bool) -> Dict[str, Any]:
+        """
+        Determine resumption strategy based on existing state.
+
+        Returns:
+            Dict with resumption information
+        """
+        if force_new_run:
+            return {
+                "status": "Starting new run (forced)",
+                "resume_from": None,
+                "previous_run": None,
+                "action": "new",
+            }
+
+        # Check for incomplete runs
+        incomplete_run = self._find_most_recent_incomplete_run()
+        if incomplete_run:
+            # Resume the incomplete run
+            self.run_id = incomplete_run["run_id"]
+            return {
+                "status": f"Resuming incomplete run: {incomplete_run['run_id']}",
+                "resume_from": incomplete_run["last_completed_step"],
+                "previous_run": incomplete_run,
+                "action": "resume",
+            }
+
+        # Check if current config has a recent successful run
+        recent_successful = self._find_recent_successful_run()
+        if recent_successful:
+            return {
+                "status": f"Starting new run (previous successful: {recent_successful['run_id']})",
+                "resume_from": None,
+                "previous_run": recent_successful,
+                "action": "new",
+            }
+
+        # First time running
+        return {
+            "status": "Starting first training run",
+            "resume_from": None,
+            "previous_run": None,
+            "action": "new",
+        }
+
+    def _find_most_recent_incomplete_run(self) -> Optional[Dict[str, Any]]:
+        """Find the most recent incomplete run."""
+        # Use checkpoint_dir from base class
+        state_file = self.checkpoint_dir / "current_run.json"
+
+        if not state_file.exists():
+            return None
+
+        try:
+            with open(state_file, "r") as f:
+                current_run_info = json.load(f)
+
+            run_id = current_run_info.get("run_id")
+            if not run_id:
+                return None
+
+            run_dir = self.checkpoint_dir / run_id
+            if not run_dir.exists():
+                # Cleanup stale state
+                state_file.unlink()
+                return None
+
+            # Check if run is actually incomplete
+            if self._is_run_complete(run_id):
+                # Run is complete, cleanup state
+                state_file.unlink()
+                return None
+
+            return {
+                "run_id": run_id,
+                "last_completed_step": current_run_info.get("last_completed_step"),
+                "started_at": current_run_info.get("started_at"),
+                "config_hash": current_run_info.get("config_hash"),
+            }
+
+        except Exception as e:
+            self.logger.warning(f"Could not read current run state: {e}")
+            # Cleanup corrupted state
+            if state_file.exists():
+                state_file.unlink()
+            return None
+
+    def _find_recent_successful_run(self) -> Optional[Dict[str, Any]]:
+        """Find recent successful run with same config."""
+        config_hash = self._get_config_hash()
+
+        # Look for recent successful runs (last 7 days)
+        cutoff_date = datetime.now() - timedelta(days=7)
+
+        if not self.checkpoint_dir.exists():
+            return None
+
+        successful_runs = []
+        for run_dir in self.checkpoint_dir.iterdir():
+            if not run_dir.is_dir() or not run_dir.name.replace("_", "").isdigit():
+                continue
+
+            if not self._is_run_complete(run_dir.name):
+                continue
+
+            # Check if run is recent
+            try:
+                run_date = datetime.strptime(run_dir.name, "%Y%m%d_%H%M%S")
+                if run_date < cutoff_date:
+                    continue
+            except ValueError:
+                continue
+
+            # Check config compatibility
+            artifacts_file = run_dir / "pipeline_artifacts.json"
+            if artifacts_file.exists():
+                try:
+                    with open(artifacts_file, "r") as f:
+                        artifacts = json.load(f)
+
+                    run_config_hash = artifacts.get("config_snapshot", {}).get(
+                        "config_hash"
+                    )
+                    if run_config_hash == config_hash:
+                        successful_runs.append(
+                            {
+                                "run_id": run_dir.name,
+                                "completed_at": artifacts.get(
+                                    "pipeline_artifacts", {}
+                                ).get("end_time"),
+                                "config_hash": run_config_hash,
+                            }
+                        )
+                except Exception:
+                    continue
+
+        # Return most recent successful run
+        if successful_runs:
+            successful_runs.sort(key=lambda x: x["completed_at"] or "", reverse=True)
+            return successful_runs[0]
+
+        return None
+
+    def _setup_directories(self):
+        """Set up directory structure without symlinks."""
+        self.run_dir = self.checkpoint_dir / self.run_id
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Update current run state
+        self._update_current_run_state()
+
+    def _update_current_run_state(self):
+        """Update the current run state file."""
+        state_file = self.checkpoint_dir / "current_run.json"
+
+        state = {
+            "run_id": self.run_id,
+            "started_at": datetime.now().isoformat(),
+            "config_hash": self._get_config_hash(),
+            "last_completed_step": None,
+            "status": "active",
+        }
+
+        try:
+            with open(state_file, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Could not update current run state: {e}")
+
+    def _get_config_hash(self) -> str:
+        """Get configuration hash for compatibility checking."""
+        training_config = self.config_manager.get_model_training_config()
+
+        # Include key parameters that affect training compatibility
+        config_elements = {
+            "model_name": training_config.model_name_or_path,
+            "learning_rate": training_config.learning_rate,
+            "batch_size": training_config.per_device_train_batch_size,
+            "epochs": training_config.num_train_epochs,
+            "max_length": training_config.max_length,
+            "use_peft": training_config.use_peft,
+        }
+
+        if training_config.use_peft and training_config.peft_config:
+            config_elements.update(
+                {
+                    "lora_r": training_config.peft_config.get("r", 8),
+                    "lora_alpha": training_config.peft_config.get("lora_alpha", 16),
+                }
+            )
+
+        config_str = json.dumps(config_elements, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()[:12]
+
+    def _initialize_artifacts(self) -> Dict[str, Any]:
+        """Initialize training artifacts."""
+        artifacts_file = self.run_dir / "pipeline_artifacts.json"
+
+        # Try to load existing artifacts if resuming
+        if self.resume_info["action"] == "resume" and artifacts_file.exists():
+            try:
+                with open(artifacts_file, "r") as f:
+                    data = json.load(f)
+                artifacts = data.get("pipeline_artifacts", {})
+                self.logger.info("📂 Loaded existing training artifacts")
+                return artifacts
+            except Exception as e:
+                self.logger.warning(f"Could not load existing artifacts: {e}")
+
+        # Create new artifacts
+        return {
             "run_id": self.run_id,
             "start_time": None,
             "end_time": None,
@@ -76,17 +311,14 @@ class TrainingPipeline(BasePipeline):
             "validation_results": None,
             "registration_results": None,
             "training_successful": False,
-            "artifacts_dir": str(self.checkpoint_dir / self.run_id),
+            "artifacts_dir": str(self.run_dir),
+            "config_hash": self._get_config_hash(),
         }
-
-        # Create run-specific artifacts directory
-        self.run_artifacts_dir = Path(self.training_artifacts["artifacts_dir"])
-        self.run_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_initial_state(self) -> Dict[str, Any]:
         """Get initial state for training pipeline."""
         return {
-            "run_id": self.run_id,
+            "run_id": getattr(self, "run_id", "unknown"),
             "data_pipeline_completed": False,
             "model_training_completed": False,
             "model_evaluation_completed": False,
@@ -94,7 +326,6 @@ class TrainingPipeline(BasePipeline):
             "model_registration_completed": False,
             "training_successful": False,
             "current_step": "initialization",
-            "artifacts": self.training_artifacts.copy(),
             "last_checkpoint": None,
         }
 
@@ -102,98 +333,25 @@ class TrainingPipeline(BasePipeline):
         self,
         use_existing_data: bool = False,
         data_path: Optional[str] = None,
-        resume_from_step: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Run the complete training pipeline.
+        Run the training pipeline with automatic resumption.
 
-        Args:
-            use_existing_data: Skip data pipeline and use existing data
-            data_path: Path to existing processed data
-            resume_from_step: Step to resume from ('data', 'training', 'evaluation', 'validation', 'registration')
-
-        Returns:
-            Dict: Complete training results and artifacts
+        The pipeline automatically determines where to start based on
+        previous state - no manual step specification needed.
         """
         try:
             self.logger.info(f"🚀 Starting training pipeline - Run ID: {self.run_id}")
             self.training_artifacts["start_time"] = datetime.now().isoformat()
 
-            # Determine starting step
-            start_step = resume_from_step or self._determine_resume_step()
-            self.logger.info(f"📍 Starting from step: {start_step}")
+            # Auto-determine starting point
+            start_step = self._determine_start_step(use_existing_data, data_path)
+            self.logger.info(f"📍 Starting from: {start_step}")
 
-            # Step 1: Data Pipeline
-            if start_step in [None, "data"] and not use_existing_data:
-                self._run_data_pipeline()
-            elif use_existing_data and data_path:
-                self._use_existing_data(data_path)
-            elif self.pipeline_state.get("data_pipeline_completed"):
-                self.logger.info("✅ Data pipeline already completed - skipping")
-                self.training_artifacts["processed_data_path"] = self.pipeline_state[
-                    "artifacts"
-                ].get("processed_data_path")
-            else:
-                raise MLPipelineException(
-                    "No data available. Run data pipeline or provide existing data path."
-                )
+            # Execute pipeline steps
+            self._execute_pipeline_steps(start_step, use_existing_data, data_path)
 
-            # Step 2: Model Training
-            if start_step in [None, "data", "training"]:
-                self._run_model_training()
-            elif self.pipeline_state.get("model_training_completed"):
-                self.logger.info("✅ Model training already completed - skipping")
-                self.training_artifacts["model_path"] = self.pipeline_state[
-                    "artifacts"
-                ].get("model_path")
-
-            # Step 3: Model Evaluation
-            if start_step in [None, "data", "training", "evaluation"]:
-                self._run_model_evaluation()
-            elif self.pipeline_state.get("model_evaluation_completed"):
-                self.logger.info("✅ Model evaluation already completed - skipping")
-                self.training_artifacts["evaluation_results"] = self.pipeline_state[
-                    "artifacts"
-                ].get("evaluation_results")
-
-            # Step 4: Model Validation
-            if start_step in [None, "data", "training", "evaluation", "validation"]:
-                self._run_model_validation()
-            elif self.pipeline_state.get("model_validation_completed"):
-                self.logger.info("✅ Model validation already completed - skipping")
-                self.training_artifacts["validation_results"] = self.pipeline_state[
-                    "artifacts"
-                ].get("validation_results")
-
-            # Step 5: Model Registration (conditional)
-            validation_passed = self.training_artifacts["validation_results"][
-                "validation_passed"
-            ]
-            registration_config = self.config_manager.get_model_registration_config()
-
-            if validation_passed and not registration_config.dry_run:
-                if start_step in [
-                    None,
-                    "data",
-                    "training",
-                    "evaluation",
-                    "validation",
-                    "registration",
-                ]:
-                    self._run_model_registration()
-                elif self.pipeline_state.get("model_registration_completed"):
-                    self.logger.info(
-                        "✅ Model registration already completed - skipping"
-                    )
-                    self.training_artifacts["registration_results"] = (
-                        self.pipeline_state["artifacts"].get("registration_results")
-                    )
-            else:
-                self.logger.warning(
-                    "⚠️ Skipping model registration (validation failed or dry run mode)"
-                )
-
-            # Finalize pipeline
+            # Finalize
             self._finalize_pipeline()
 
             return self.training_artifacts
@@ -202,51 +360,217 @@ class TrainingPipeline(BasePipeline):
             self.logger.error(f"❌ Training pipeline failed: {str(e)}")
             self.training_artifacts["error"] = str(e)
             self.training_artifacts["training_successful"] = False
-            self.pipeline_state["training_successful"] = False
-            self._save_pipeline_state()
+            self._save_artifacts()
             raise MLPipelineException(f"Training pipeline failed: {str(e)}") from e
 
-    def _determine_resume_step(self) -> Optional[str]:
-        """Determine which step to resume from based on pipeline state."""
-        if not self.pipeline_state.get("data_pipeline_completed"):
-            return "data"
-        elif not self.pipeline_state.get("model_training_completed"):
-            return "training"
-        elif not self.pipeline_state.get("model_evaluation_completed"):
-            return "evaluation"
-        elif not self.pipeline_state.get("model_validation_completed"):
-            return "validation"
-        elif not self.pipeline_state.get("model_registration_completed"):
-            return "registration"
-        else:
-            self.logger.info("🔄 All steps completed, re-running registration")
-            return "registration"
+    def _determine_start_step(
+        self, use_existing_data: bool, data_path: Optional[str]
+    ) -> str:
+        """Automatically determine where to start the pipeline."""
 
-    def _run_data_pipeline(self) -> None:
-        """Execute data pipeline step."""
+        # If resuming, use the resume point
+        if self.resume_info["action"] == "resume":
+            last_step = self.resume_info["resume_from"]
+            if last_step == "data_pipeline":
+                return "model_training"
+            elif last_step == "model_training":
+                return "model_evaluation"
+            elif last_step == "model_evaluation":
+                return "model_validation"
+            elif last_step == "model_validation":
+                return "model_registration"
+            else:
+                return "data_pipeline"
+
+        # For new runs, start from the beginning unless data is provided
+        if use_existing_data and data_path:
+            return "model_training"
+
+        return "data_pipeline"
+
+    def _execute_pipeline_steps(
+        self, start_step: str, use_existing_data: bool, data_path: Optional[str]
+    ):
+        """Execute pipeline steps starting from the specified step."""
+
+        steps = [
+            "data_pipeline",
+            "model_training",
+            "model_evaluation",
+            "model_validation",
+            "model_registration",
+        ]
+        start_index = steps.index(start_step)
+
+        for step in steps[start_index:]:
+            if step == "data_pipeline":
+                if use_existing_data and data_path:
+                    self._use_existing_data(data_path)
+                else:
+                    self._run_data_pipeline()
+            elif step == "model_training":
+                self._run_model_training(use_existing_data, data_path)
+            elif step == "model_evaluation":
+                self._run_model_evaluation()
+            elif step == "model_validation":
+                self._run_model_validation()
+            elif step == "model_registration":
+                validation_passed = self.training_artifacts["validation_results"][
+                    "validation_passed"
+                ]
+                registration_config = (
+                    self.config_manager.get_model_registration_config()
+                )
+                skip_registration = self.dry_run or registration_config.dry_run
+
+                if not skip_registration:
+                    self._run_model_registration()
+                else:
+                    if self.dry_run:
+                        self.logger.info(
+                            "⏭️ Skipping model registration (pipeline dry run enabled)"
+                        )
+                    else:
+                        self.logger.info(
+                            "⏭️ Skipping model registration (config dry run enabled)"
+                        )
+
+            # Update progress after each step
+            self._update_step_progress(step)
+
+    def _update_step_progress(self, completed_step: str):
+        """Update progress in current run state."""
+        state_file = self.checkpoint_dir / "current_run.json"
+
         try:
-            self.logger.info("📊 Step 1: Data Pipeline")
-            self.pipeline_state["current_step"] = "data_pipeline"
+            if state_file.exists():
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+            else:
+                state = {"run_id": self.run_id}
 
-            # Run data pipeline
-            data_result = self.data_pipeline.run_full_pipeline()
+            state["last_completed_step"] = completed_step
+            state["last_updated"] = datetime.now().isoformat()
 
-            # Update state
-            self.training_artifacts["processed_data_path"] = data_result[
-                "processed_data_path"
-            ]
-            self.pipeline_state["data_pipeline_completed"] = True
-            self.pipeline_state["artifacts"]["processed_data_path"] = data_result[
-                "processed_data_path"
-            ]
-
-            self.logger.info(
-                f"✅ Data pipeline completed: {data_result['processed_data_path']}"
-            )
-            self._save_checkpoint("data_pipeline_completed")
+            with open(state_file, "w") as f:
+                json.dump(state, f, indent=2)
 
         except Exception as e:
-            raise MLPipelineException(f"Data pipeline failed: {str(e)}") from e
+            self.logger.warning(f"Could not update step progress: {e}")
+
+    def _finalize_pipeline(self):
+        """Finalize pipeline and cleanup state."""
+        self.training_artifacts["end_time"] = datetime.now().isoformat()
+        self.training_artifacts["training_successful"] = True
+
+        # Save final artifacts
+        self._save_artifacts()
+
+        # Create completion marker
+        completion_marker = self.run_dir / "TRAINING_COMPLETE"
+        with open(completion_marker, "w") as f:
+            f.write(f"Training completed at: {self.training_artifacts['end_time']}\n")
+            f.write(f"Run ID: {self.run_id}\n")
+
+        # Cleanup current run state
+        current_run_state = self.checkpoint_dir / "current_run.json"
+        if current_run_state.exists():
+            current_run_state.unlink()
+
+        self.logger.info("🎉 Training pipeline completed successfully!")
+        self.logger.info(f"📁 Artifacts saved to: {self.run_dir}")
+
+    def _save_artifacts(self):
+        """Save training artifacts."""
+        artifacts_metadata = {
+            "pipeline_artifacts": self.training_artifacts,
+            "config_snapshot": {
+                "config_hash": self._get_config_hash(),
+                "training_config": self.config_manager.get_model_training_config().__dict__,
+                "evaluation_config": self.config_manager.get_model_evaluation_config().__dict__,
+                "validation_config": self.config_manager.get_model_validation_config().__dict__,
+                "registration_config": self.config_manager.get_model_registration_config().__dict__,
+            },
+            "saved_at": datetime.now().isoformat(),
+        }
+
+        artifacts_file = self.run_dir / "pipeline_artifacts.json"
+        with open(artifacts_file, "w") as f:
+            json.dump(artifacts_metadata, f, indent=2, default=str)
+
+    def _is_run_complete(self, run_id: str) -> bool:
+        """Check if a run is complete."""
+        run_dir = self.checkpoint_dir / run_id
+        return (run_dir / "TRAINING_COMPLETE").exists()
+
+    def _resolve_processed_data_path(self) -> Optional[str]:
+        """
+        Resolve processed data path from artifacts or fallback to latest data.
+
+        Returns:
+            str: Path to processed data file
+        """
+        # Try to get from current artifacts
+        processed_path = self.training_artifacts.get("processed_data_path")
+        if processed_path and Path(processed_path).exists():
+            return processed_path
+
+        # Try to load from saved artifacts
+        artifacts_file = self.run_dir / "pipeline_artifacts.json"
+        if artifacts_file.exists():
+            try:
+                with open(artifacts_file, "r") as f:
+                    saved_artifacts = json.load(f)
+
+                saved_path = saved_artifacts.get("pipeline_artifacts", {}).get(
+                    "processed_data_path"
+                )
+                if saved_path and Path(saved_path).exists():
+                    return saved_path
+            except Exception as e:
+                self.logger.warning(f"Could not load saved artifacts: {e}")
+
+        # Fallback: find the most recent processed data file
+        data_dir = Path("data/processed")
+        if data_dir.exists():
+            csv_files = list(data_dir.glob("*.csv"))
+            if csv_files:
+                # Get the most recently modified CSV file
+                latest_file = max(csv_files, key=lambda p: p.stat().st_mtime)
+                self.logger.info(f"📂 Using fallback data path: {latest_file}")
+                return str(latest_file)
+
+        # Last resort: check common locations
+        common_paths = [
+            "data/processed/ai_text_detection_pile_processed.csv",
+            "data/processed/AI_Text_Detection_Pile_sampled_50k.csv",
+        ]
+
+        for path in common_paths:
+            if Path(path).exists():
+                self.logger.info(f"📂 Using common data path: {path}")
+                return path
+
+        return None
+
+    # Pipeline step implementations
+    def _run_data_pipeline(self):
+        """Execute data pipeline step."""
+        self.logger.info("📊 Step 1: Data Pipeline")
+
+        if self.data_pipeline is None:
+            self.data_pipeline = DataPipeline(self.config_manager)
+
+        data_result = self.data_pipeline.run_full_pipeline()
+        self.training_artifacts["processed_data_path"] = data_result[
+            "processed_data_path"
+        ]
+
+        self._save_artifacts()
+
+        self.logger.info(
+            f"✅ Data pipeline completed: {data_result['processed_data_path']}"
+        )
 
     def _use_existing_data(self, data_path: str) -> None:
         """Use existing processed data."""
@@ -254,289 +578,270 @@ class TrainingPipeline(BasePipeline):
             raise MLPipelineException(f"Data path does not exist: {data_path}")
 
         self.training_artifacts["processed_data_path"] = data_path
-        self.pipeline_state["data_pipeline_completed"] = True
-        self.pipeline_state["artifacts"]["processed_data_path"] = data_path
-
         self.logger.info(f"📊 Using existing data: {data_path}")
 
-    def _run_model_training(self) -> None:
+    def _run_model_training(
+        self, use_existing_data: bool, existing_data_path: Optional[str] = None
+    ):
         """Execute model training step."""
-        try:
-            self.logger.info("🎯 Step 2: Model Training")
-            self.pipeline_state["current_step"] = "model_training"
+        self.logger.info("🎯 Step 2: Model Training")
 
-            # Initialize trainer
-            training_config = self.config_manager.get_model_training_config()
-            # Set run-specific output directory
-            training_config = training_config.__class__(
-                **{
-                    **training_config.__dict__,
-                    "output_dir": self.run_artifacts_dir / "model",
-                }
+        # Resolve the data path
+        data_path = (
+            existing_data_path
+            if use_existing_data and existing_data_path
+            else self._resolve_processed_data_path()
+        )
+        if not data_path:
+            raise MLPipelineException(
+                "No processed data found. Please run data pipeline first or provide --use-existing-data"
             )
+        # Update artifacts with resolved path
+        self.training_artifacts["processed_data_path"] = data_path
+        self._save_artifacts()  # Persist immediately
 
-            self.model_trainer = ModelTrainer(training_config)
+        # Initialize trainer with simple run-specific output directory
+        training_config = self.config_manager.get_model_training_config()
+        from dataclasses import replace
 
-            # Prepare datasets
-            datasets = self.model_trainer.prepare_datasets(
-                self.training_artifacts["processed_data_path"]
-            )
+        training_config = replace(
+            training_config,
+            output_dir=self.run_dir / "model",
+            train_path=data_path,  # Ensure config has the data path
+        )
 
-            # Build model
-            model = self.model_trainer.build_model()
+        self.model_trainer = ModelTrainer(training_config)
 
-            # Train model
-            training_result = self.model_trainer.train(datasets)
+        # Build model and prepare datasets
+        model = self.model_trainer.build_model()
+        datasets = self.model_trainer.prepare_datasets(data_path)
 
-            # Save model
-            model_path = self.model_trainer.save()
+        # Train and save
+        training_result = self.model_trainer.train(datasets)
+        model_path = self.model_trainer.save()
 
-            # Update state
-            self.training_artifacts["model_path"] = model_path
-            self.training_artifacts["training_metrics"] = training_result
-            self.pipeline_state["model_training_completed"] = True
-            self.pipeline_state["artifacts"]["model_path"] = model_path
-            self.pipeline_state["artifacts"]["training_metrics"] = training_result
+        self.training_artifacts["model_path"] = model_path
+        self.training_artifacts["training_metrics"] = training_result
 
-            self.logger.info(f"✅ Model training completed: {model_path}")
-            self._save_checkpoint("model_training_completed")
+        self.logger.info(f"✅ Model training completed: {model_path}")
 
-        except Exception as e:
-            raise MLPipelineException(f"Model training failed: {str(e)}") from e
-
-    def _run_model_evaluation(self) -> None:
+    def _run_model_evaluation(self):
         """Execute model evaluation step."""
-        try:
-            self.logger.info("📈 Step 3: Model Evaluation")
-            self.pipeline_state["current_step"] = "model_evaluation"
+        self.logger.info("📈 Step 3: Model Evaluation")
 
-            # Initialize evaluator
-            evaluation_config = self.config_manager.get_model_evaluation_config()
-            # Set run-specific output directory
-            evaluation_config = evaluation_config.__class__(
-                **{
-                    **evaluation_config.__dict__,
-                    "evaluation_output_dir": self.run_artifacts_dir / "evaluation",
-                }
-            )
+        # Initialize evaluator
+        evaluation_config = self.config_manager.get_model_evaluation_config()
+        from dataclasses import replace
 
-            self.model_evaluator = ModelEvaluator(evaluation_config)
+        evaluation_config = replace(
+            evaluation_config, evaluation_output_dir=self.run_dir / "evaluation"
+        )
 
-            # Load model
-            self.model_evaluator.load_model(self.training_artifacts["model_path"])
+        self.model_evaluator = ModelEvaluator(evaluation_config)
 
-            # Get test dataset path from training results
-            test_dataset_path = None
-            if "test_dataset_path" in self.training_artifacts.get(
-                "training_metrics", {}
-            ):
-                test_dataset_path = self.training_artifacts["training_metrics"][
-                    "test_dataset_path"
-                ]
-            else:
-                # Fallback: look for test dataset in model output directory
-                model_dir = Path(self.training_artifacts["model_path"]).parent
-                tokenized_data_dir = model_dir / "tokenized_data"
-                test_path = tokenized_data_dir / "test"
-                if test_path.exists():
-                    test_dataset_path = str(test_path)
-                else:
-                    # Last resort: use the processed data file (not ideal, but backward compatible)
-                    self.logger.warning(
-                        "⚠️ Test dataset not found, using full processed data for evaluation"
-                    )
-                    test_dataset_path = self.training_artifacts["processed_data_path"]
+        # Load model and evaluate
+        self.model_evaluator.load_model(self.training_artifacts["model_path"])
 
-            self.logger.info(f"📊 Using test dataset: {test_dataset_path}")
+        # Get test dataset path from training results
+        test_dataset_path = self.training_artifacts.get("training_metrics", {}).get(
+            "test_dataset_path"
+        )
+        if not test_dataset_path:
+            # Fallback to processed data
+            test_dataset_path = self.training_artifacts["processed_data_path"]
 
-            # Run evaluation on test data
-            evaluation_result = self.model_evaluator.evaluate(test_dataset_path)
+        evaluation_result = self.model_evaluator.evaluate(test_dataset_path)
+        self.training_artifacts["evaluation_results"] = evaluation_result
 
-            # Update state
-            self.training_artifacts["evaluation_results"] = evaluation_result
-            self.pipeline_state["model_evaluation_completed"] = True
-            self.pipeline_state["artifacts"]["evaluation_results"] = evaluation_result
+        self.logger.info(f"✅ Model evaluation completed")
+        self.logger.info(
+            f"   Test Accuracy: {evaluation_result['metrics']['accuracy']:.4f}"
+        )
+        self.logger.info(f"   Test F1-score: {evaluation_result['metrics']['f1']:.4f}")
 
-            self.logger.info(f"✅ Model evaluation completed")
-            self.logger.info(
-                f"   Test Accuracy: {evaluation_result['metrics']['accuracy']:.4f}"
-            )
-            self.logger.info(
-                f"   Test F1-score: {evaluation_result['metrics']['f1']:.4f}"
-            )
-
-            self._save_checkpoint("model_evaluation_completed")
-
-        except Exception as e:
-            raise MLPipelineException(f"Model evaluation failed: {str(e)}") from e
-
-    def _run_model_validation(self) -> None:
+    def _run_model_validation(self):
         """Execute model validation step."""
-        try:
-            self.logger.info("🔍 Step 4: Model Validation")
-            self.pipeline_state["current_step"] = "model_validation"
+        self.logger.info("🔍 Step 4: Model Validation")
 
-            # Initialize validator
-            validation_config = self.config_manager.get_model_validation_config()
-            # Set run-specific output directory
-            validation_config = validation_config.__class__(
-                **{
-                    **validation_config.__dict__,
-                    "validation_output_dir": self.run_artifacts_dir / "validation",
-                }
-            )
+        # Initialize validator
+        validation_config = self.config_manager.get_model_validation_config()
+        from dataclasses import replace
 
-            self.model_validator = ModelValidator(validation_config)
+        validation_config = replace(
+            validation_config, validation_output_dir=self.run_dir / "validation"
+        )
 
-            # Get predictions from evaluation results
-            if (
-                hasattr(self.model_evaluator, "predictions")
-                and self.model_evaluator.predictions is not None
-            ):
-                predictions = self.model_evaluator.predictions
-                true_labels = self.model_evaluator.true_labels
-                probabilities = self.model_evaluator.probabilities
-            else:
-                raise MLPipelineException(
-                    "No predictions available from evaluation step"
-                )
+        self.model_validator = ModelValidator(validation_config)
 
-            # Run validation
-            validation_result = self.model_validator.validate_model(
-                predictions=predictions,
-                true_labels=true_labels,
-                probabilities=probabilities,
-                metadata=self.training_artifacts["evaluation_results"],
-            )
+        # Get predictions from evaluation results
+        evaluation_results = self.training_artifacts["evaluation_results"]
+        predictions = evaluation_results.get("predictions", [])
+        true_labels = evaluation_results.get("true_labels", [])
+        probabilities = evaluation_results.get("probabilities", [])
 
-            # Update state
-            self.training_artifacts["validation_results"] = validation_result
-            self.pipeline_state["model_validation_completed"] = True
-            self.pipeline_state["artifacts"]["validation_results"] = validation_result
+        # Run validation
+        validation_result = self.model_validator.validate_model(
+            predictions=predictions,
+            true_labels=true_labels,
+            probabilities=probabilities,
+            metadata=evaluation_results,
+        )
 
-            validation_status = (
-                "✅ PASSED" if validation_result["validation_passed"] else "❌ FAILED"
-            )
-            self.logger.info(f"{validation_status} Model validation completed")
+        self.training_artifacts["validation_results"] = validation_result
 
-            if not validation_result["validation_passed"]:
-                self.logger.warning("⚠️ Model failed validation checks:")
-                for issue in validation_result["validation_issues"]:
-                    self.logger.warning(f"   - {issue}")
+        validation_status = (
+            "✅ PASSED" if validation_result["validation_passed"] else "❌ FAILED"
+        )
+        self.logger.info(f"{validation_status} Model validation completed")
 
-            self._save_checkpoint("model_validation_completed")
-
-        except Exception as e:
-            raise MLPipelineException(f"Model validation failed: {str(e)}") from e
-
-    def _run_model_registration(self) -> None:
+    def _run_model_registration(self):
         """Execute model registration step."""
-        try:
-            self.logger.info("📦 Step 5: Model Registration")
-            self.pipeline_state["current_step"] = "model_registration"
+        self.logger.info("📦 Step 5: Model Registration")
 
-            # Initialize registrar
-            registration_config = self.config_manager.get_model_registration_config()
-            self.model_registrar = ModelRegistrar(registration_config)
+        # Initialize registrar
+        registration_config = self.config_manager.get_model_registration_config()
+        from dataclasses import replace
 
-            # Prepare metadata
-            metadata = {
+        registration_config = replace(
+            registration_config,
+            local_registry_dir=self.run_dir.parent.parent / "model_registry",
+            dry_run=self.dry_run,
+        )
+
+        self.model_registrar = ModelRegistrar(registration_config)
+
+        # Prepare comprehensive metadata for model card generation
+        training_config = self.config_manager.get_model_training_config()
+        evaluation_config = self.config_manager.get_model_evaluation_config()
+
+        # Extract actual training results and metrics
+        training_metrics = self.training_artifacts.get("training_metrics", {})
+        evaluation_results = self.training_artifacts.get("evaluation_results", {})
+        validation_results = self.training_artifacts.get("validation_results", {})
+
+        # Prepare comprehensive metadata
+        metadata = {
+            # Training configuration (serializable format)
+            "training_config": {
+                "model_name_or_path": training_config.model_name_or_path,
+                "num_train_epochs": training_config.num_train_epochs,
+                "per_device_train_batch_size": training_config.per_device_train_batch_size,
+                "per_device_eval_batch_size": training_config.per_device_eval_batch_size,
+                "learning_rate": float(training_config.learning_rate),
+                "weight_decay": float(training_config.weight_decay),
+                "warmup_ratio": float(training_config.warmup_ratio),
+                "max_grad_norm": float(training_config.max_grad_norm),
+                "max_length": training_config.max_length,
+                "use_peft": training_config.use_peft,
+                "fp16": training_config.fp16,
+                "bf16": training_config.bf16,
+                "gradient_accumulation_steps": training_config.gradient_accumulation_steps,
+                "early_stopping_patience": training_config.early_stopping_patience,
+                "metric_for_best_model": training_config.metric_for_best_model,
+                "eval_strategy": training_config.eval_strategy,
+                "eval_steps": training_config.eval_steps,
+                "seed": training_config.seed,
+            },
+            # PEFT/LoRA configuration if available
+            "peft_config": {},
+            # Training metrics and results
+            "training_results": training_metrics,
+            # Evaluation metrics (the key ones for model card)
+            "metrics": evaluation_results.get("metrics", {}),
+            # Validation results
+            "validation_results": validation_results,
+            # Dataset information
+            "dataset_info": {
+                "source": "artem9k/ai-text-detection-pile",
+                "processed_data_path": self.training_artifacts.get(
+                    "processed_data_path"
+                ),
+                "train_split": float(
+                    training_config.validation_split + training_config.test_split
+                ),  # Remaining for train
+                "val_split": float(training_config.validation_split),
+                "test_split": float(training_config.test_split),
+            },
+            # Pipeline metadata
+            "pipeline_metadata": {
                 "run_id": self.run_id,
-                "training_metrics": self.training_artifacts.get("training_metrics", {}),
-                "evaluation_results": self.training_artifacts.get(
-                    "evaluation_results", {}
-                ),
-                "validation_results": self.training_artifacts.get(
-                    "validation_results", {}
-                ),
-                "model_path": self.training_artifacts["model_path"],
-                "training_config": self.config_manager.get_model_training_config().__dict__,
-                "training_timestamp": self.training_artifacts["start_time"],
-            }
-
-            # Register model
-            registration_result = self.model_registrar.register_model(
-                model_path=self.training_artifacts["model_path"],
-                metadata=metadata,
-                validation_passed=self.training_artifacts["validation_results"][
-                    "validation_passed"
-                ],
-            )
-
-            # Update state
-            self.training_artifacts["registration_results"] = registration_result
-            self.pipeline_state["model_registration_completed"] = True
-            self.pipeline_state["artifacts"][
-                "registration_results"
-            ] = registration_result
-
-            if registration_result["success"]:
-                self.logger.info(f"✅ Model registration completed successfully")
-                for registry, result in registration_result["registrations"].items():
-                    self.logger.info(
-                        f"   {registry}: {result.get('status', 'unknown')}"
-                    )
-            else:
-                self.logger.warning(f"⚠️ Model registration completed with errors")
-                for registry, error in registration_result["errors"].items():
-                    self.logger.error(f"   {registry}: {error}")
-
-            self._save_checkpoint("model_registration_completed")
-
-        except Exception as e:
-            raise MLPipelineException(f"Model registration failed: {str(e)}") from e
-
-    def _finalize_pipeline(self) -> None:
-        """Finalize the training pipeline."""
-        self.training_artifacts["end_time"] = datetime.now().isoformat()
-        self.training_artifacts["training_successful"] = True
-
-        self.pipeline_state["training_successful"] = True
-        self.pipeline_state["current_step"] = "completed"
-        self.pipeline_state["completed_at"] = self.training_artifacts["end_time"]
-
-        # Save final artifacts metadata
-        artifacts_metadata = {
-            "pipeline_artifacts": self.training_artifacts,
-            "pipeline_state": self.pipeline_state,
-            "config_snapshot": {
-                "training_config": self.config_manager.get_model_training_config().__dict__,
-                "evaluation_config": self.config_manager.get_model_evaluation_config().__dict__,
-                "validation_config": self.config_manager.get_model_validation_config().__dict__,
-                "registration_config": self.config_manager.get_model_registration_config().__dict__,
+                "training_date": datetime.now().strftime("%Y-%m-%d"),
+                "environment": self.config_manager.environment,
+                "author": "Srikanth Gali",
+                "organization": "Independent Research",
+                "repository_url": "https://github.com/srikanthgali/para_detect",
+                "contact": "https://github.com/srikanthgali/para_detect/issues",
             },
         }
 
-        artifacts_file = self.run_artifacts_dir / "pipeline_artifacts.json"
-        with open(artifacts_file, "w") as f:
-            json.dump(artifacts_metadata, f, indent=2, default=str)
+        # Add PEFT configuration details if available
+        if training_config.use_peft and training_config.peft_config:
+            peft_config = training_config.peft_config
+            if hasattr(peft_config, "__dict__"):
+                # Convert ConfigBox to dict
+                peft_dict = dict(peft_config)
+            else:
+                peft_dict = peft_config if isinstance(peft_config, dict) else {}
 
-        self._save_pipeline_state()
+            metadata["peft_config"] = {
+                "r": peft_dict.get("r", 64),
+                "lora_alpha": peft_dict.get("lora_alpha", 128),
+                "lora_dropout": float(peft_dict.get("lora_dropout", 0.1)),
+                "bias": peft_dict.get("bias", "all"),
+                "target_modules": peft_dict.get("target_modules", []),
+                "task_type": str(peft_dict.get("task_type", "SEQ_CLS")),
+            }
 
-        self.logger.info("🎉 Training pipeline completed successfully!")
-        self.logger.info(f"📁 Artifacts saved to: {self.run_artifacts_dir}")
+            # Add PEFT info to training config
+            metadata["training_config"]["lora_r"] = metadata["peft_config"]["r"]
+            metadata["training_config"]["lora_alpha"] = metadata["peft_config"][
+                "lora_alpha"
+            ]
+            metadata["training_config"]["lora_dropout"] = metadata["peft_config"][
+                "lora_dropout"
+            ]
 
-    def _save_checkpoint(self, checkpoint_name: str) -> None:
-        """Save a pipeline checkpoint."""
-        checkpoint_data = {
-            "checkpoint_name": checkpoint_name,
-            "pipeline_state": self.pipeline_state,
-            "training_artifacts": self.training_artifacts,
-            "timestamp": datetime.now().isoformat(),
-        }
+        # Determine validation status
+        validation_passed = (
+            validation_results.get("validation_passed", False)
+            if validation_results
+            else False
+        )
 
-        self.save_checkpoint(checkpoint_name, checkpoint_data)
-        self._save_pipeline_state()
+        # Register model with comprehensive metadata
+        try:
+            registration_result = self.model_registrar.register_model(
+                model_path=self.training_artifacts["model_path"],
+                tokenizer_path=self.training_artifacts[
+                    "model_path"
+                ],  # Same path for both
+                metadata=metadata,
+                validation_passed=validation_passed,
+            )
+
+            self.training_artifacts["registration_results"] = registration_result
+
+            if registration_result.get("success", False):
+                self.logger.info("✅ Model registration completed successfully")
+            else:
+                self.logger.warning("⚠️ Model registration had issues")
+
+        except Exception as e:
+            self.logger.error(f"❌ Model registration failed: {str(e)}")
+            # Don't fail the entire pipeline for registration issues
+            self.training_artifacts["registration_results"] = {
+                "success": False,
+                "error": str(e),
+            }
 
     def get_training_status(self) -> Dict[str, Any]:
         """Get current training pipeline status."""
         return {
             "run_id": self.run_id,
-            "pipeline_state": self.pipeline_state.copy(),
-            "training_artifacts": self.training_artifacts.copy(),
             "current_step": self.pipeline_state.get("current_step", "unknown"),
             "is_complete": self.pipeline_state.get("training_successful", False),
-            "artifacts_dir": str(self.run_artifacts_dir),
+            "artifacts_dir": str(self.run_dir),
+            "resume_info": self.resume_info,
         }
 
 
@@ -544,62 +849,64 @@ def main():
     """CLI interface for training pipeline."""
     parser = argparse.ArgumentParser(description="ParaDetect Training Pipeline")
 
-    parser.add_argument("--run-id", type=str, help="Unique run identifier")
-
     parser.add_argument("--config", type=str, help="Path to custom config file")
-
     parser.add_argument(
-        "--resume", action="store_true", help="Resume from last checkpoint"
+        "--force-new-run", action="store_true", help="Force new run (don't resume)"
     )
-
     parser.add_argument(
-        "--resume-from-step",
-        type=str,
-        choices=["data", "training", "evaluation", "validation", "registration"],
-        help="Specific step to resume from",
+        "--use-existing-data", type=str, help="Path to existing processed data"
     )
-
-    parser.add_argument(
-        "--use-existing-data",
-        type=str,
-        help="Path to existing processed data (skip data pipeline)",
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Run in dry-run mode (no model registration)",
-    )
-
+    parser.add_argument("--dry-run", action="store_true", help="Run in dry-run mode")
     parser.add_argument(
         "--status", action="store_true", help="Show training status and exit"
+    )
+    parser.add_argument(
+        "--list-runs", action="store_true", help="List all runs and exit"
     )
 
     args = parser.parse_args()
 
     try:
         # Initialize configuration manager
-        if args.config:
-            config_manager = ConfigurationManager(args.config)
-        else:
-            config_manager = ConfigurationManager()
+        config_manager = (
+            ConfigurationManager(args.config) if args.config else ConfigurationManager()
+        )
 
         # Override dry_run if specified
         if args.dry_run:
-            # This would require modifying the config - for now just log
-            print("🔧 Dry-run mode enabled")
+            # This would need to be implemented in config_manager
+            pass
+
+        if args.list_runs:
+            # Show available runs
+            pipeline = TrainingPipeline(config_manager, force_new_run=True)
+            runs_dir = pipeline.checkpoint_dir
+            if runs_dir.exists():
+                print("📋 Available training runs:")
+                for run_dir in runs_dir.iterdir():
+                    if run_dir.is_dir() and run_dir.name.replace("_", "").isdigit():
+                        status = (
+                            "✅ Complete"
+                            if (run_dir / "TRAINING_COMPLETE").exists()
+                            else "⏸️ Incomplete"
+                        )
+                        print(f"   {run_dir.name}: {status}")
+            else:
+                print("No training runs found.")
+            return
 
         # Initialize pipeline
-        pipeline = TrainingPipeline(config_manager, args.run_id)
+        pipeline = TrainingPipeline(config_manager, args.force_new_run, args.dry_run)
 
         # Show status if requested
         if args.status:
             status = pipeline.get_training_status()
-            print(f"📊 Training Pipeline Status:")
-            print(f"  Run ID: {status['run_id']}")
-            print(f"  Current Step: {status['current_step']}")
-            print(f"  Complete: {status['is_complete']}")
-            print(f"  Artifacts Dir: {status['artifacts_dir']}")
+            print("📊 Training Pipeline Status:")
+            print(f"   Run ID: {status['run_id']}")
+            print(f"   Current Step: {status['current_step']}")
+            print(f"   Is Complete: {status['is_complete']}")
+            print(f"   Artifacts Dir: {status['artifacts_dir']}")
+            print(f"   Resume Info: {status['resume_info']['status']}")
             return
 
         # Run pipeline
@@ -607,39 +914,14 @@ def main():
             result = pipeline.run(
                 use_existing_data=bool(args.use_existing_data),
                 data_path=args.use_existing_data,
-                resume_from_step=args.resume_from_step,
             )
 
         # Print results
         if result["training_successful"]:
             print("🎉 Training pipeline completed successfully!")
-            print(f"📁 Model saved to: {result['model_path']}")
-            print(f"📊 Run ID: {result['run_id']}")
-
-            # Print key metrics
-            if "evaluation_results" in result:
-                metrics = result["evaluation_results"]["metrics"]
-                print(f"📈 Final Metrics:")
-                print(f"   Accuracy: {metrics.get('accuracy', 0):.4f}")
-                print(f"   F1-score: {metrics.get('f1', 0):.4f}")
-
-            # Print validation status
-            if "validation_results" in result:
-                validation_passed = result["validation_results"]["validation_passed"]
-                print(
-                    f"🔍 Validation: {'✅ PASSED' if validation_passed else '❌ FAILED'}"
-                )
-
-            # Print registration status
-            if "registration_results" in result:
-                reg_success = result["registration_results"]["success"]
-                print(
-                    f"📦 Registration: {'✅ SUCCESS' if reg_success else '❌ FAILED'}"
-                )
+            print(f"📁 Artifacts: {result['artifacts_dir']}")
         else:
-            print("❌ Training pipeline failed!")
-            if "error" in result:
-                print(f"Error: {result['error']}")
+            print("❌ Training pipeline failed")
 
     except Exception as e:
         print(f"❌ Pipeline execution failed: {str(e)}")

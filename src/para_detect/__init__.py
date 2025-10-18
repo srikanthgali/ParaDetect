@@ -10,6 +10,35 @@ import time
 from pathlib import Path
 from typing import Optional
 
+
+def _configure_dev_environment_optimizations():
+    """Configure environment variables and PyTorch settings based on deployment context"""
+    environment = (
+        os.getenv("ENVIRONMENT") or os.getenv("PARA_DETECT_ENV") or "development"
+    )
+
+    if environment == "development":
+        # 🍎 Local macOS/MPS development optimizations
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+        os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+        import torch
+
+        torch.set_num_threads(1)
+    else:
+        # Default minimal setup
+        import torch
+
+    return environment
+
+
+# Apply environment-specific optimizations
+current_environment = _configure_dev_environment_optimizations()
+
 # Add src to path if not already there
 project_root = Path(__file__).parent.parent.parent
 if str(project_root) not in sys.path:
