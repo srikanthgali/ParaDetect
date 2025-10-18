@@ -40,7 +40,7 @@ from para_detect.constants import (
     DEVICE_PRIORITY,
     DEFAULT_RANDOM_STATE,
 )
-from para_detect.utils.helpers import create_directories
+from para_detect.utils.helpers import create_directories, detect_device
 from para_detect import get_logger
 from para_detect.constants import LABEL_MAPPING, REVERSE_LABEL_MAPPING
 
@@ -76,7 +76,7 @@ class ModelTrainer:
         set_seed(config.seed)
 
         # Initialize device
-        self.device = self._detect_device()
+        self.device = detect_device(self.config.device_preference, self.logger)
         self.logger.info(f"🔧 Using device: {self.device}")
 
         # Model and tokenizer
@@ -120,48 +120,6 @@ class ModelTrainer:
         # Shared cache under artifacts
         cache_dir = Path("artifacts/tokenized_datasets") / f"cache_{cache_hash}"
         return cache_dir
-
-    def _detect_device(self) -> torch.device:
-        """Detect optimal device for training."""
-        try:
-            if self.config.device_preference:
-                if self.config.device_preference == "auto":
-                    pass  # Continue with auto-detection
-                else:
-                    device = torch.device(self.config.device_preference)
-                    if device.type == "cuda" and not torch.cuda.is_available():
-                        self.logger.warning(
-                            "CUDA requested but not available, falling back to auto-detection"
-                        )
-                    elif device.type == "mps" and not torch.backends.mps.is_available():
-                        self.logger.warning(
-                            "MPS requested but not available, falling back to auto-detection"
-                        )
-                    else:
-                        return device
-
-            # Auto-detection
-            for device_type in DEVICE_PRIORITY:
-                if device_type == "cuda" and torch.cuda.is_available():
-                    device = torch.device("cuda")
-                    self.logger.info(
-                        f"🚀 CUDA available: {torch.cuda.get_device_name(0)}"
-                    )
-                    self.logger.info(
-                        f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
-                    )
-                    return device
-                elif device_type == "mps" and torch.backends.mps.is_available():
-                    self.logger.info("🍎 Using Apple Metal Performance Shaders (MPS)")
-                    return torch.device("mps")
-                elif device_type == "cpu":
-                    self.logger.info("💻 Using CPU for training")
-                    return torch.device("cpu")
-
-            return torch.device("cpu")
-
-        except Exception as e:
-            raise DeviceError(f"Failed to detect device: {str(e)}") from e
 
     def prepare_datasets(self, data_path: Optional[str] = None) -> DatasetDict:
         """

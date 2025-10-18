@@ -1,11 +1,14 @@
 import yaml
 from box import ConfigBox
 from box.exceptions import BoxValueError, BoxKeyError
-from typing import Any
+from typing import Any, Optional
 from ensure import ensure_annotations
 from pathlib import Path
 import logging
 import json
+import torch
+from para_detect.constants import DEVICE_PRIORITY
+from para_detect.core.exceptions import DeviceError
 
 
 @ensure_annotations
@@ -57,3 +60,70 @@ def load_json(path: Path) -> dict:
         data = json.load(f)
     logging.info(f"JSON file loaded: {path}")
     return data
+
+
+@ensure_annotations
+def detect_device(
+    device_preference: Optional[str] = None, logger: Optional[logging.Logger] = None
+) -> torch.device:
+    """
+    Detect optimal device (CUDA -> MPS -> CPU) with an optional user preference.
+
+    Args:
+        device_preference: "auto" (or None), "cuda", "mps", or "cpu"
+        logger: optional logger; falls back to module logger if not provided
+
+    Returns:
+        torch.device
+
+    Raises:
+        DeviceError: if detection fails unexpectedly
+    """
+    log = logger or logging.getLogger(__name__)
+    try:
+        pref = (device_preference or "").strip().lower()
+        if pref and pref != "auto":
+            # Respect explicit preference if available; otherwise warn and fall back
+            try:
+                device = torch.device(pref)
+                if device.type == "cuda" and not torch.cuda.is_available():
+                    log.warning(
+                        "CUDA requested but not available, falling back to auto-detection"
+                    )
+                elif device.type == "mps" and not (
+                    hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                ):
+                    log.warning(
+                        "MPS requested but not available, falling back to auto-detection"
+                    )
+                else:
+                    return device
+            except Exception as e:
+                log.warning(
+                    f"Requested device '{device_preference}' is invalid: {e}. Falling back to auto-detection."
+                )
+
+        # Auto-detection by priority
+        for device_type in DEVICE_PRIORITY:
+            if device_type == "cuda" and torch.cuda.is_available():
+                name = torch.cuda.get_device_name(0)
+                props = torch.cuda.get_device_properties(0)
+                log.info(f"🚀 CUDA available: {name}")
+                log.info(f"   GPU Memory: {props.total_memory / 1e9:.1f} GB")
+                return torch.device("cuda")
+            if (
+                device_type == "mps"
+                and hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()
+            ):
+                log.info("🍎 Using Apple Metal Performance Shaders (MPS)")
+                return torch.device("mps")
+            if device_type == "cpu":
+                log.info("💻 Using CPU")
+                return torch.device("cpu")
+
+        # Final fallback
+        return torch.device("cpu")
+
+    except Exception as e:
+        raise DeviceError(f"Failed to detect device: {str(e)}") from e
