@@ -10,6 +10,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import logging
+
+for logger_name in ["botocore", "boto3", "urllib3", "s3transfer", "sagemaker"]:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 
 def _configure_dev_environment_optimizations():
     """Configure environment variables and PyTorch settings based on deployment context"""
@@ -89,7 +94,7 @@ def initialize_app(environment: Optional[str] = None, force_reinit: bool = False
 
             logger = get_logger("para_detect.init")
             logger.info(f"ParaDetect initialized - Environment: {resolved_environment}")
-            logger.debug(f"Config loaded from: {config_manager.base_config}")
+            # logger.debug(f"Config loaded from: {config_manager.base_config}")
 
             _initialized = True
             return config_manager

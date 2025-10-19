@@ -3,10 +3,6 @@ Model Training Component for ParaDetect
 Handles DeBERTa fine-tuning with LoRA support, checkpointing, and resumption
 """
 
-import logging
-
-for logger_name in ["botocore", "boto3", "urllib3", "s3transfer", "sagemaker"]:
-    logging.getLogger(logger_name).setLevel(logging.WARNING)
 import os
 import json
 import shutil

@@ -8,4 +8,5 @@ __all__ = [
     "create_directories",
     "save_json",
     "load_json",
+    "setup_debugger",
 ]

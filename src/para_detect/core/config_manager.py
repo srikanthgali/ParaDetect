@@ -64,6 +64,9 @@ class ConfigurationManager:
         # Apply model config overrides
         self._apply_model_config_overrides(env_config)
 
+        # Apply inference config overrides
+        self._apply_inference_config_overrides(env_config)
+
         # Apply deployment config overrides
         self._apply_deployment_config_overrides(env_config)
 
@@ -164,6 +167,12 @@ class ConfigurationManager:
                 )
             else:
                 self.deberta_config.tokenizer = ConfigBox(tokenizer_overrides)
+
+    def _apply_inference_config_overrides(self, env_config):
+        """Apply environment-specific overrides to inference config"""
+        inference_overrides = env_config.get("inference_overrides", {})
+        if inference_overrides:
+            self._deep_merge_dict(self.base_config.inference, inference_overrides)
 
     def _apply_deployment_config_overrides(self, env_config):
         """Apply environment-specific overrides to deployment config"""

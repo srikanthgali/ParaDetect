@@ -207,6 +207,13 @@ environments:
       require_validation_pass: false
       registry_type: "local"
       local_registry_dir: "artifacts/model_registry/"
+    inference_overrides:
+      log_predictions: true
+      enable_monitoring: false
+      device_preference: "mps"
+      batch_size: 8
+      max_length: 128
+
   staging:
     data_ingestion:
       sample_size: 50000

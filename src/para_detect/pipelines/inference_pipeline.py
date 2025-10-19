@@ -13,10 +13,13 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import torch
+import torch.nn.functional as fn
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+from peft import PeftConfig, PeftModel
 
 from para_detect.core.config_manager import ConfigurationManager
 from para_detect.entities.inference_config import InferenceConfig
+from para_detect.components.model_registration import ModelRegistrar
 from para_detect.core.exceptions import (
     ParaDetectException,
     ModelPredictionError,
@@ -24,6 +27,7 @@ from para_detect.core.exceptions import (
 )
 from para_detect.constants import DEVICE_PRIORITY, REVERSE_LABEL_MAPPING
 from para_detect import get_logger
+from para_detect.utils.helpers import detect_device
 
 
 class InferencePipeline:
@@ -54,7 +58,7 @@ class InferencePipeline:
             config_manager: Configuration manager instance
         """
         self.config_manager = config_manager or ConfigurationManager()
-        self.config = config or self._load_inference_config()
+        self.config = config or config_manager.get_inference_config()
         self.logger = get_logger(self.__class__.__name__)
 
         # Override model path if provided
@@ -64,7 +68,7 @@ class InferencePipeline:
             )
 
         # Initialize device
-        self.device = self._detect_device()
+        self.device = detect_device(self.config.device_preference, self.logger)
         self.logger.info(f"🔧 Using device: {self.device}")
 
         # Model components
@@ -84,75 +88,6 @@ class InferencePipeline:
         self.is_initialized = False
         self._initialize_pipeline()
 
-    def _load_inference_config(self) -> InferenceConfig:
-        """Load inference configuration from config manager."""
-        try:
-            # Try to get inference config from config manager
-            inference_config_dict = self.config_manager.base_config.get("inference", {})
-
-            return InferenceConfig(
-                batch_size=inference_config_dict.get("batch_size", 32),
-                max_length=inference_config_dict.get("max_length", 512),
-                device_preference=inference_config_dict.get("device_preference", None),
-                text_column=inference_config_dict.get("text_column", "text"),
-                preprocessing_enabled=inference_config_dict.get(
-                    "preprocessing_enabled", True
-                ),
-                include_probabilities=inference_config_dict.get(
-                    "include_probabilities", True
-                ),
-                include_confidence=inference_config_dict.get(
-                    "include_confidence", True
-                ),
-                confidence_threshold=inference_config_dict.get(
-                    "confidence_threshold", 0.5
-                ),
-                enable_monitoring=inference_config_dict.get("enable_monitoring", True),
-                log_predictions=inference_config_dict.get("log_predictions", False),
-                chunk_size=inference_config_dict.get("chunk_size", 1000),
-                progress_bar=inference_config_dict.get("progress_bar", True),
-                skip_errors=inference_config_dict.get("skip_errors", True),
-                max_retries=inference_config_dict.get("max_retries", 3),
-            )
-        except Exception as e:
-            self.logger.warning(
-                f"Error loading inference config, using defaults: {str(e)}"
-            )
-            return InferenceConfig()
-
-    def _detect_device(self) -> torch.device:
-        """Detect optimal device for inference."""
-        try:
-            if self.config.device_preference:
-                if self.config.device_preference == "auto":
-                    pass  # Continue with auto-detection
-                else:
-                    device = torch.device(self.config.device_preference)
-                    if device.type == "cuda" and not torch.cuda.is_available():
-                        self.logger.warning(
-                            "CUDA requested but not available, falling back to auto-detection"
-                        )
-                    elif device.type == "mps" and not torch.backends.mps.is_available():
-                        self.logger.warning(
-                            "MPS requested but not available, falling back to auto-detection"
-                        )
-                    else:
-                        return device
-
-            # Auto-detection
-            for device_type in DEVICE_PRIORITY:
-                if device_type == "cuda" and torch.cuda.is_available():
-                    return torch.device("cuda")
-                elif device_type == "mps" and torch.backends.mps.is_available():
-                    return torch.device("mps")
-                elif device_type == "cpu":
-                    return torch.device("cpu")
-
-            return torch.device("cpu")
-
-        except Exception as e:
-            raise DeviceError(f"Failed to detect device: {str(e)}") from e
-
     def _initialize_pipeline(self):
         """Initialize inference pipeline components."""
         try:
@@ -160,6 +95,7 @@ class InferencePipeline:
 
             # Load model and tokenizer
             model_path = self._resolve_model_path()
+            self.resolved_model_path = str(model_path)
             self.logger.info(f"📥 Loading model from: {model_path}")
 
             # Load tokenizer
@@ -168,14 +104,41 @@ class InferencePipeline:
                 use_fast=True,  # Enable fast tokenizer for better performance
             )
 
-            # Load model
-            self.model = AutoModelForSequenceClassification.from_pretrained(
-                model_path,
-                torch_dtype=(
-                    torch.float16 if self.device.type == "cuda" else torch.float32
-                ),
-                device_map=None,  # We'll move manually for better control
-            )
+            # Check if the model is a PEFT model (with adapters)
+            is_peft_model = (Path(model_path) / "adapter_config.json").exists()
+
+            if is_peft_model:
+                self.logger.info(
+                    "🔧 PEFT model detected. Loading base model and adapters..."
+                )
+                # 1. Load the base model configuration to get its name
+                peft_config = PeftConfig.from_pretrained(model_path)
+                base_model_name = peft_config.base_model_name_or_path
+                self.logger.info(f"🤖 Loading base model: {base_model_name}")
+
+                # 2. Load the base model
+                base_model = AutoModelForSequenceClassification.from_pretrained(
+                    base_model_name,
+                    torch_dtype=(
+                        torch.float16 if self.device.type == "cuda" else torch.float32
+                    ),
+                    device_map=None,  # Control device mapping manually
+                )
+
+                # 3. Apply the LoRA adapters
+                self.logger.info(f"🎨 Applying LoRA adapters from: {model_path}")
+                self.model = PeftModel.from_pretrained(base_model, model_path)
+
+            else:
+                self.logger.info("🤖 Standard model detected. Loading directly...")
+                # Load a standard, non-PEFT model
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    model_path,
+                    dtype=(
+                        torch.float16 if self.device.type == "cuda" else torch.float32
+                    ),
+                    device_map=None,  # We'll move manually for better control
+                )
 
             # Move model to device and set to eval mode
             self.model.to(self.device)
@@ -187,7 +150,7 @@ class InferencePipeline:
                 model=self.model,
                 tokenizer=self.tokenizer,
                 device=0 if self.device.type == "cuda" else -1,
-                return_all_scores=True,
+                top_k=None,
                 truncation=True,
                 max_length=self.config.max_length,
                 batch_size=self.config.batch_size,
@@ -216,29 +179,14 @@ class InferencePipeline:
                     f"Model path does not exist: {self.config.model_path}"
                 )
 
-        # Try to find latest model in artifacts
-        artifacts_dir = Path("artifacts/models")
-        if artifacts_dir.exists():
-            model_dirs = [d for d in artifacts_dir.iterdir() if d.is_dir()]
-            if model_dirs:
-                # Sort by modification time and get latest
-                latest_model = max(model_dirs, key=lambda x: x.stat().st_mtime)
-                model_path = latest_model / "final_model"
-                if model_path.exists():
-                    return str(model_path)
+        # To load the latest model in production:
+        registrar_config = self.config_manager.get_model_registration_config()
+        registrar = ModelRegistrar(registrar_config)
+        latest_info = registrar.get_latest_model_info()
 
-        # Try local registry
-        registry_dir = Path("artifacts/model_registry")
-        if registry_dir.exists():
-            index_file = registry_dir / "registry_index.json"
-            if index_file.exists():
-                with open(index_file, "r") as f:
-                    index = json.load(f)
-                if index.get("latest"):
-                    latest_version = index["latest"]
-                    model_path = registry_dir / f"v_{latest_version}" / "model"
-                    if model_path.exists():
-                        return str(model_path)
+        if latest_info:
+            model_path = latest_info["model_path"]
+            return model_path
 
         raise ParaDetectException(
             "No trained model found. Please run training pipeline first."
@@ -255,7 +203,7 @@ class InferencePipeline:
             Dict containing prediction results with confidence and probabilities
         """
         if not self.is_initialized:
-            raise ParaDetectException("Pipeline not initialized")
+            raise ParaDetectException("Pipeline is not initialized")
 
         try:
             start_time = time.time()
@@ -280,7 +228,7 @@ class InferencePipeline:
             # Generate prediction
             with torch.no_grad():
                 outputs = self.model(**inputs)
-                probabilities = torch.softmax(outputs.logits, dim=-1)
+                probabilities = fn.softmax(outputs.logits, dim=-1)
                 prediction = torch.argmax(probabilities, dim=-1)
 
             # Extract results
@@ -670,7 +618,7 @@ class InferencePipeline:
             num_params = sum(p.numel() for p in self.model.parameters())
 
             return {
-                "model_path": self.config.model_path,
+                "model_path": self.config.model_path or self.resolved_model_path,
                 "model_type": self.model.__class__.__name__,
                 "num_parameters": num_params,
                 "device": str(self.device),
@@ -719,36 +667,6 @@ def main():
     # Prediction modes
     parser.add_argument("--text", type=str, help="Single text to predict")
 
-    parser.add_argument(
-        "--file", type=str, help="Input file (CSV/Parquet) for batch prediction"
-    )
-
-    parser.add_argument("--output", type=str, help="Output file for batch predictions")
-
-    parser.add_argument(
-        "--text-column",
-        type=str,
-        default="text",
-        help="Name of text column in input file",
-    )
-
-    # Processing options
-    parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size for processing"
-    )
-
-    parser.add_argument(
-        "--max-length", type=int, default=512, help="Maximum sequence length"
-    )
-
-    parser.add_argument(
-        "--device",
-        type=str,
-        choices=["auto", "cuda", "mps", "cpu"],
-        default="auto",
-        help="Device to use for inference",
-    )
-
     # Utility options
     parser.add_argument(
         "--health-check", action="store_true", help="Perform health check and exit"
@@ -756,16 +674,6 @@ def main():
 
     parser.add_argument(
         "--model-info", action="store_true", help="Show model information and exit"
-    )
-
-    parser.add_argument(
-        "--server",
-        action="store_true",
-        help="Start inference server (requires FastAPI)",
-    )
-
-    parser.add_argument(
-        "--port", type=int, default=8000, help="Port for inference server"
     )
 
     args = parser.parse_args()
@@ -777,18 +685,14 @@ def main():
         else:
             config_manager = ConfigurationManager()
 
-        # Create inference config
-        inference_config = InferenceConfig(
-            model_path=args.model_path,
-            batch_size=args.batch_size,
-            max_length=args.max_length,
-            device_preference=args.device,
-            text_column=args.text_column,
-        )
+        # Load inference config from ConfigurationManager (with env overrides applied)
+        inference_config = config_manager.get_inference_config()
 
-        # Initialize pipeline
+        # Create inference config
         pipeline = InferencePipeline(
-            config=inference_config, config_manager=config_manager
+            config=inference_config,
+            model_path=args.model_path,
+            config_manager=config_manager,
         )
 
         # Handle different modes
@@ -810,53 +714,6 @@ def main():
                 print(f"  {key}: {value}")
             return
 
-        if args.server:
-            # Start FastAPI server
-            try:
-                from fastapi import FastAPI, HTTPException
-                from pydantic import BaseModel
-                import uvicorn
-
-                app = FastAPI(title="ParaDetect Inference API")
-
-                class PredictionRequest(BaseModel):
-                    text: str
-
-                class BatchPredictionRequest(BaseModel):
-                    texts: List[str]
-
-                @app.get("/health")
-                def health_check():
-                    return pipeline.health_check()
-
-                @app.get("/model-info")
-                def model_info():
-                    return pipeline.get_model_info()
-
-                @app.post("/predict")
-                def predict(request: PredictionRequest):
-                    try:
-                        return pipeline.predict_single(request.text)
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=str(e))
-
-                @app.post("/predict-batch")
-                def predict_batch(request: BatchPredictionRequest):
-                    try:
-                        return pipeline.predict_batch(request.texts)
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=str(e))
-
-                print(f"🚀 Starting inference server on port {args.port}")
-                print(f"📍 API docs available at: http://localhost:{args.port}/docs")
-                uvicorn.run(app, host="0.0.0.0", port=args.port)
-
-            except ImportError:
-                print(
-                    "❌ FastAPI not available. Install with: pip install fastapi uvicorn"
-                )
-                return
-
         if args.text:
             # Single prediction
             print(f"🔍 Predicting single text...")
@@ -873,26 +730,9 @@ def main():
                 for label, prob in result["probabilities"].items():
                     print(f"    {label}: {prob:.4f}")
 
-        elif args.file:
-            # Batch prediction
-            print(f"📁 Processing file: {args.file}")
-            output_file = pipeline.predict_from_file(
-                input_file=args.file,
-                output_file=args.output,
-                text_column=args.text_column,
-            )
-            print(f"✅ Results saved to: {output_file}")
-
-            # Show stats
-            stats = pipeline.get_stats()
-            print(f"📈 Performance Stats:")
-            print(f"  Total Predictions: {stats['total_predictions']}")
-            print(f"  Average Time: {stats['average_inference_time']:.4f}s")
-            print(f"  Errors: {stats['errors']}")
-
         else:
             print(
-                "❌ No prediction mode specified. Use --text, --file, --health-check, --model-info, or --server"
+                "❌ No prediction mode specified. Use --text, --health-check, --model-info"
             )
             parser.print_help()
 
