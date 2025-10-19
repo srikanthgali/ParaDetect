@@ -43,7 +43,7 @@ training:
 
 # Dataset Configuration
 dataset:
-  train_path: null  # Path to training CSV or null to use data pipeline
+  train_path: null  # Path to training parquet or null to use data pipeline
   validation_split: 0.15
   test_split: 0.15
   max_length: 512

@@ -13,7 +13,7 @@ data_ingestion:
   dataset_name: "artem9k/ai-text-detection-pile"
   source_type: "huggingface"  # huggingface, local, url
   raw_data_dir: "data/raw/"
-  dataset_filename: "ai_text_detection_pile.csv"
+  dataset_filename: "ai_text_detection_pile.parquet"
   sample_size: null  # For development/testing, use a smaller sample
   random_state: 42
 
@@ -30,7 +30,7 @@ data_preprocessing:
   remove_special_chars: false
   balance_classes: true
   processed_data_dir: "data/processed/"
-  processed_filename: "ai_text_detection_pile_processed.csv"
+  processed_filename: "ai_text_detection_pile_processed.parquet"
   random_state: 42
 
 # Data Validation Configuration

@@ -122,7 +122,7 @@ class ModelTrainer:
         Load and tokenize datasets with caching support.
 
         Args:
-            data_path: Path to training data (CSV or dataset directory)
+            data_path: Path to training data (Parquet or dataset directory)
 
         Returns:
             DatasetDict: Tokenized train/validation datasets
@@ -159,8 +159,8 @@ class ModelTrainer:
 
             self.logger.info(f"📥 Loading data from: {data_path}")
 
-            if Path(data_path).suffix == ".csv":
-                df = pd.read_csv(data_path)
+            if Path(data_path).suffix == ".parquet":
+                df = pd.read_parquet(data_path)
             else:
                 raise ModelTrainingError(f"Unsupported data format: {data_path}")
 

@@ -533,17 +533,17 @@ class TrainingPipeline(BasePipeline):
         # Fallback: find the most recent processed data file
         data_dir = Path("data/processed")
         if data_dir.exists():
-            csv_files = list(data_dir.glob("*.csv"))
-            if csv_files:
-                # Get the most recently modified CSV file
-                latest_file = max(csv_files, key=lambda p: p.stat().st_mtime)
+            parquet_files = list(data_dir.glob("*.parquet"))
+            if parquet_files:
+                # Get the most recently modified Parquet file
+                latest_file = max(parquet_files, key=lambda p: p.stat().st_mtime)
                 self.logger.info(f"📂 Using fallback data path: {latest_file}")
                 return str(latest_file)
 
         # Last resort: check common locations
         common_paths = [
-            "data/processed/ai_text_detection_pile_processed.csv",
-            "data/processed/AI_Text_Detection_Pile_sampled_50k.csv",
+            "data/processed/ai_text_detection_pile_processed.parquet",
+            "data/processed/AI_Text_Detection_Pile_sampled_50k.parquet",
         ]
 
         for path in common_paths:

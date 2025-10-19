@@ -1,7 +1,7 @@
 {
   "metadata": {
-    "data_path": "data/processed/ai_text_detection_pile_processed.csv",
-    "validation_timestamp": "2025-10-17T18:49:36.917889",
+    "data_path": "data/processed/ai_text_detection_pile_processed.parquet",
+    "validation_timestamp": "2025-10-19T17:56:36.699800",
     "dataset_shape": [
       548,
       3

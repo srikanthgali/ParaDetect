@@ -126,7 +126,7 @@ class DataIngestion(BaseComponent):
         Ingest data from HuggingFace Hub.
 
         Returns:
-            str: Path to the saved CSV file
+            str: Path to the saved Parquet file
         """
         try:
             self.logger.info(
@@ -152,9 +152,9 @@ class DataIngestion(BaseComponent):
                         f"Sampled dataset to {self.config.sample_size} rows"
                     )
 
-            # Save to CSV
+            # Save to Parquet
             output_path = self.config.raw_data_dir / self.config.dataset_filename
-            df.to_csv(output_path, index=False)
+            df.to_parquet(output_path, index=False, engine="pyarrow")
 
             self.logger.info(f"Dataset saved to: {output_path}")
             self.logger.info(f"Final dataset shape: {df.shape}")
@@ -181,22 +181,22 @@ class DataIngestion(BaseComponent):
             data_file = self.config.raw_data_dir / self.config.dataset_filename
 
             if not data_file.exists():
-                # Look for any CSV files in the directory
-                csv_files = list(self.config.raw_data_dir.glob("*.csv"))
-                if not csv_files:
+                # Look for any Parquet files in the directory
+                parquet_files = list(self.config.raw_data_dir.glob("*.parquet"))
+                if not parquet_files:
                     raise DataIngestionError(
                         f"No data files found in {self.config.raw_data_dir}"
                     )
 
-                data_file = csv_files[0]
-                self.logger.warning(f"Using first available CSV file: {data_file}")
+                data_file = parquet_files[0]
+                self.logger.warning(f"Using first available Parquet file: {data_file}")
 
             # Validate file
             if not data_file.exists():
                 raise DataIngestionError(f"Data file not found: {data_file}")
 
             # Load and validate data
-            df = pd.read_csv(data_file)
+            df = pd.read_parquet(data_file)
             self.logger.info(f"Loaded local dataset from: {data_file}")
             self.logger.info(f"Dataset shape: {df.shape}")
 
@@ -246,7 +246,7 @@ class DataIngestion(BaseComponent):
             dict: Dataset information including shape, columns, types, etc.
         """
         try:
-            df = pd.read_csv(file_path)
+            df = pd.read_parquet(file_path)
 
             info = {
                 "file_path": file_path,

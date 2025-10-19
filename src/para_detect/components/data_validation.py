@@ -83,7 +83,7 @@ class DataValidation(BaseComponent):
     def _load_data(self, data_path: str) -> pd.DataFrame:
         """Load data from file."""
         try:
-            df = pd.read_csv(data_path)
+            df = pd.read_parquet(data_path)
             self.logger.info(f"Loaded data with shape: {df.shape}")
             return df
         except Exception as e:

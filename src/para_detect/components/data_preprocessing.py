@@ -92,7 +92,7 @@ class DataPreprocessing(BaseComponent):
     def _load_data(self, input_path: str) -> pd.DataFrame:
         """Load data from input file."""
         try:
-            df = pd.read_csv(input_path)
+            df = pd.read_parquet(input_path)
             self.logger.info(f"Loaded data with shape: {df.shape}")
             return df
         except Exception as e:
@@ -371,7 +371,7 @@ class DataPreprocessing(BaseComponent):
     def _save_processed_data(self, df: pd.DataFrame) -> str:
         """Save processed data to file."""
         output_path = self.config.processed_data_dir / self.config.processed_filename
-        df.to_csv(output_path, index=False)
+        df.to_parquet(output_path, index=False, engine="pyarrow")
 
         # Save metadata
         metadata = {

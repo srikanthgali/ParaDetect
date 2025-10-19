@@ -157,7 +157,7 @@ class ModelEvaluator:
         Comprehensive model evaluation.
 
         Args:
-            dataset: Test dataset (Dataset, CSV path, DataFrame, or path to tokenized test dataset)
+            dataset: Test dataset (Dataset, Parquet path, DataFrame, or path to tokenized test dataset)
 
         Returns:
             Dict: Comprehensive evaluation results
@@ -312,8 +312,8 @@ class ModelEvaluator:
                 texts = dataset[self.config.text_column]
                 labels = dataset[self.config.label_column]
             elif isinstance(dataset, str):
-                # Load from CSV
-                df = pd.read_csv(dataset)
+                # Load from Parquet file
+                df = pd.read_parquet(dataset)
                 texts = df[self.config.text_column].tolist()
                 labels = df[self.config.label_column].tolist()
             elif isinstance(dataset, pd.DataFrame):
