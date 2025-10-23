@@ -24,6 +24,7 @@ tensorboard
 pyyaml>=6.0
 python-box>=7.0.0
 pathlib
+python-dotenv>=1.0.0
 tqdm>=4.65.0
 nltk
 

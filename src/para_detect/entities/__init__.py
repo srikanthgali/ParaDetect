@@ -8,6 +8,7 @@ from para_detect.entities.model_evaluation_config import ModelEvaluationConfig
 from para_detect.entities.model_validation_config import ModelValidationConfig
 from para_detect.entities.model_registration_config import ModelRegistrationConfig
 from para_detect.entities.inference_config import InferenceConfig
+from para_detect.entities.s3_config import S3Config
 
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "ModelValidationConfig",
     "ModelRegistrationConfig",
     "InferenceConfig",
+    "S3Config",
 ]

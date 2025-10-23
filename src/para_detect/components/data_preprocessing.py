@@ -1,16 +1,21 @@
 """Data preprocessing module for ParaDetect"""
 
+import hashlib
+import os
 import pandas as pd
 import numpy as np
 import re
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
 import logging
-
+from datetime import datetime
+import json
 
 from para_detect.core.base_component import BaseComponent
+from para_detect.core.config_manager import ConfigurationManager
 from para_detect.core.exceptions import DataPreprocessingError
 from para_detect.entities.data_preprocessing_config import DataPreprocessingConfig
+from para_detect.utils.s3_manager import S3Manager
 from para_detect.constants import HUMAN_LABEL, AI_LABEL
 
 
@@ -22,25 +27,56 @@ class DataPreprocessing(BaseComponent):
     class balancing, and other preprocessing tasks.
     """
 
-    def __init__(self, config: DataPreprocessingConfig):
+    def __init__(
+        self,
+        config: DataPreprocessingConfig,
+        config_manager: ConfigurationManager = None,
+    ):
         """
         Initialize DataPreprocessing component.
 
         Args:
             config: DataPreprocessingConfig object containing preprocessing parameters
+            config_manager: ConfigurationManager for S3 configuration access
         """
-        self.config = config
+        self.preprocessing_config = config
+        self.config_manager = config_manager or ConfigurationManager()
 
-        super().__init__(config)
+        # Pass the config as a dictionary to the base class for backward compatibility
+        super().__init__(config.__dict__)
 
         # Create directories
-        self.config.processed_data_dir.mkdir(parents=True, exist_ok=True)
+        self.preprocessing_config.processed_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize S3 manager
+        self._initialize_s3_manager()
 
         self.logger.info("DataPreprocessing component initialized")
 
+    def _initialize_s3_manager(self):
+        """Initialize S3 manager with automatic credential detection."""
+        try:
+            self.s3_manager = S3Manager(config_manager=self.config_manager)
+            self.s3_enabled = True
+
+            # Create bucket if it doesn't exist
+            self.s3_manager.create_bucket_if_not_exists()
+
+            self.logger.info("S3 integration enabled successfully")
+
+            # Log credential info for debugging
+            cred_info = self.s3_manager.get_credential_info()
+            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
+            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
+
+        except Exception as e:
+            self.s3_manager = None
+            self.s3_enabled = False
+            self.logger.warning(f"S3 integration disabled: {e}")
+
     def run(self, input_data_path: str) -> str:
         """
-        Execute data preprocessing process.
+        Execute data preprocessing process with S3 backup.
 
         Args:
             input_data_path: Path to the raw data file
@@ -53,6 +89,20 @@ class DataPreprocessing(BaseComponent):
         """
         try:
             self.logger.info(f"Starting data preprocessing from: {input_data_path}")
+
+            # Store input path for cache key generation
+            self._current_input_path = input_data_path
+
+            # Check if processed data exists in S3 cache first
+            local_processed_path = None
+            if self.s3_enabled and self._should_use_s3_cache():
+                local_processed_path = self._try_download_from_s3_cache(input_data_path)
+
+            if local_processed_path and Path(local_processed_path).exists():
+                self.logger.info(
+                    f"Using cached processed data from S3: {local_processed_path}"
+                )
+                return local_processed_path
 
             # Load data
             df = self._load_data(input_data_path)
@@ -75,6 +125,10 @@ class DataPreprocessing(BaseComponent):
 
             # Save processed data
             output_path = self._save_processed_data(df)
+
+            # Upload to S3 for backup and caching
+            if self.s3_enabled:
+                self._upload_processed_data_to_s3(output_path, df)
 
             # Log final statistics
             self._log_preprocessing_stats(df, "Final")
@@ -383,17 +437,208 @@ class DataPreprocessing(BaseComponent):
                 "max": int(df[self.config.text_column].str.len().max()),
                 "mean": float(df[self.config.text_column].str.len().mean()),
             },
+            "preprocessing_config": {
+                "min_text_length": self.config.min_text_length,
+                "max_text_length": self.config.max_text_length,
+                "balance_classes": self.config.balance_classes,
+                "remove_duplicates": self.config.remove_duplicates,
+                "lowercase": self.config.lowercase,
+                "random_state": self.config.random_state,
+            },
+            "created_at": datetime.now().isoformat(),
         }
 
         metadata_path = self.config.processed_data_dir / "preprocessing_metadata.json"
-        import json
 
         with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
+            f.write(json.dumps(metadata, indent=2))
 
         self.logger.info(f"Metadata saved to: {metadata_path}")
 
         return str(output_path)
+
+    def _get_s3_cache_key(self, input_data_path: str) -> str:
+        """Generate S3 cache key for the current preprocessing configuration."""
+        # Create a more stable hash based on filename and file stats
+        input_path = Path(input_data_path)
+
+        # Use filename and file size for consistent hashing
+        cache_input_components = [input_path.name]
+
+        # Add file size if file exists (for cache invalidation when file changes)
+        if input_path.exists():
+            cache_input_components.append(str(input_path.stat().st_size))
+
+        input_string = "_".join(cache_input_components)
+        input_hash = hashlib.md5(input_string.encode()).hexdigest()[:8]
+
+        # Preprocessing config components
+        cache_components = [
+            str(self.preprocessing_config.min_text_length),
+            str(self.preprocessing_config.max_text_length),
+            str(self.preprocessing_config.balance_classes),
+            str(self.preprocessing_config.remove_duplicates),
+            str(self.preprocessing_config.lowercase),
+            str(self.preprocessing_config.random_state),
+        ]
+
+        config_string = "_".join(cache_components)
+        config_hash = hashlib.md5(config_string.encode()).hexdigest()[:12]
+
+        return f"data/processed/cache/preprocessed_{input_hash}_{config_hash}.parquet"
+
+    def _should_use_s3_cache(self) -> bool:
+        """Determine if S3 cache should be checked."""
+        return getattr(self.preprocessing_config, "use_s3_cache", True)
+
+    def _upload_processed_data_to_s3(self, data_path: str, df: pd.DataFrame) -> bool:
+        """Upload processed data and metadata to S3 for backup and caching."""
+        try:
+            # Define S3 paths
+            processed_s3_key = (
+                f"data/processed/{self.preprocessing_config.processed_filename}"
+            )
+            metadata_s3_key = f"data/processed/preprocessing_metadata.json"
+
+            # Prepare metadata for S3 object metadata
+            s3_metadata = {
+                "component": "data_preprocessing",
+                "shape": str(df.shape),
+                "columns": ",".join(df.columns.tolist()),
+                "class_distribution": str(
+                    df[self.preprocessing_config.label_column].value_counts().to_dict()
+                ),
+                "min_text_length": str(self.preprocessing_config.min_text_length),
+                "max_text_length": str(self.preprocessing_config.max_text_length),
+                "balance_classes": str(self.preprocessing_config.balance_classes),
+                "processed_at": datetime.now().isoformat(),
+                "random_state": str(self.preprocessing_config.random_state),
+            }
+
+            # Upload processed data file
+            success1 = self.s3_manager.upload_file(
+                local_path=data_path,
+                s3_path=processed_s3_key,
+                folder_type="data",
+                metadata=s3_metadata,
+            )
+
+            # Upload metadata file
+            metadata_local_path = (
+                self.config.processed_data_dir / "preprocessing_metadata.json"
+            )
+            success2 = self.s3_manager.upload_file(
+                local_path=str(metadata_local_path),
+                s3_path=metadata_s3_key,
+                folder_type="data",
+                metadata=s3_metadata,
+            )
+
+            # Upload to cache folder for future use
+            cache_key = self._get_s3_cache_key(
+                getattr(self, "_current_input_path", data_path)
+            )
+            cache_metadata_key = cache_key.replace(".parquet", "_metadata.json")
+
+            success3 = self.s3_manager.upload_file(
+                local_path=data_path,
+                s3_path=cache_key,
+                folder_type="data",
+                metadata=s3_metadata,
+            )
+
+            success4 = self.s3_manager.upload_file(
+                local_path=str(metadata_local_path),
+                s3_path=cache_metadata_key,
+                folder_type="data",
+                metadata=s3_metadata,
+            )
+
+            # Log results
+            if success1:
+                self.logger.info(
+                    f"Successfully uploaded processed data to S3: {processed_s3_key}"
+                )
+            if success2:
+                self.logger.info(
+                    f"Successfully uploaded metadata to S3: {metadata_s3_key}"
+                )
+            if success3:
+                self.logger.info(
+                    f"Successfully cached processed data to S3: {cache_key}"
+                )
+            if success4:
+                self.logger.info(
+                    f"Successfully cached metadata to S3: {cache_metadata_key}"
+                )
+
+            return success1 and success2 and success3 and success4
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error uploading processed data and metadata to S3: {e}"
+            )
+            return False
+
+    def _try_download_from_s3_cache(self, input_data_path: str) -> Optional[str]:
+        """Try to download preprocessed data and metadata from S3 cache."""
+        try:
+            cache_key = self._get_s3_cache_key(input_data_path)
+            cache_metadata_key = cache_key.replace(".parquet", "_metadata.json")
+
+            local_cache_path = (
+                self.preprocessing_config.processed_data_dir
+                / self.preprocessing_config.processed_filename
+            )
+            local_metadata_path = (
+                self.preprocessing_config.processed_data_dir
+                / "preprocessing_metadata.json"
+            )
+
+            self.logger.info(f"Checking S3 cache for preprocessed data: {cache_key}")
+            self.logger.info(f"Checking S3 cache for metadata: {cache_metadata_key}")
+
+            # Check if both files exist in S3
+            data_exists = self.s3_manager.file_exists(cache_key, "data")
+            metadata_exists = self.s3_manager.file_exists(cache_metadata_key, "data")
+
+            self.logger.info(f"Cache data exists: {data_exists}")
+            self.logger.info(f"Cache metadata exists: {metadata_exists}")
+
+            if not (data_exists and metadata_exists):
+                self.logger.info("No complete cached preprocessed data found in S3")
+                return None
+
+            # Download both files
+            success1 = self.s3_manager.download_file(
+                s3_path=cache_key, local_path=local_cache_path, folder_type="data"
+            )
+
+            success2 = self.s3_manager.download_file(
+                s3_path=cache_metadata_key,
+                local_path=local_metadata_path,
+                folder_type="data",
+            )
+
+            if (
+                success1
+                and success2
+                and local_cache_path.exists()
+                and local_metadata_path.exists()
+            ):
+                self.logger.info(
+                    "Successfully downloaded cached preprocessed data and metadata from S3"
+                )
+                return str(local_cache_path)
+            else:
+                self.logger.warning(
+                    "Failed to download complete cached preprocessed data from S3"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.warning(f"Error checking S3 cache for preprocessed data: {e}")
+            return None
 
     def _log_preprocessing_stats(self, df: pd.DataFrame, stage: str) -> None:
         """Log statistics at different preprocessing stages."""

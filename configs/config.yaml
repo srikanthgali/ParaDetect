@@ -11,7 +11,7 @@ data:
 # Data Ingestion Configuration
 data_ingestion:
   dataset_name: "artem9k/ai-text-detection-pile"
-  source_type: "huggingface"  # huggingface, local, url
+  source_type: "huggingface"  # huggingface, local, url, s3
   raw_data_dir: "data/raw/"
   dataset_filename: "ai_text_detection_pile.parquet"
   sample_size: null  # For development/testing, use a smaller sample
@@ -157,6 +157,15 @@ environments:
       rotation:
         backup_count: 3
         retention_days: 7
+    s3:
+      bucket_name: "paradetect-s3-bucket-dev"
+      storage_class: "STANDARD"
+      enable_versioning: false
+      enable_lifecycle: false
+      max_retries: 1
+      folders:
+        artifacts: "artifacts/"
+        data: "data/"
     # DeBERTa config overrides
     model_overrides:
       model_name_or_path: "microsoft/deberta-v3-base"
@@ -223,12 +232,18 @@ environments:
       rotation:
         backup_count: 14
         retention_days: 30
-
+    s3:
+      bucket_name: "paradetect-s3-bucket-staging"
+      storage_class: "STANDARD"
+      enable_versioning: true
+      enable_lifecycle: true
+      max_retries: 3
+      folders:
+        artifacts: "artifacts/"
+        data: "data/"
   production:
     data_ingestion:
       sample_size: null  # Full dataset
-    inference:
-      device_preference: "cuda"
     logging:
       level: "WARNING"
       structured: true
@@ -236,10 +251,29 @@ environments:
       rotation:
         backup_count: 30
         retention_days: 90
-        compress: true
-    inference:
-      log_predictions: false
-      enable_monitoring: true
+    s3:
+      bucket_name: "paradetect-s3-bucket-prod"
+      storage_class: "STANDARD"
+      enable_versioning: true
+      enable_lifecycle: true
+      max_retries: 5
+      max_concurrency: 20
+      multipart_threshold: 128
+      folders:
+        artifacts: "artifacts/"
+        data: "data/"
+      lifecycle_rules:
+        - id: "delete_old_logs"
+          status: "Enabled"
+          filter:
+            prefix: "logs/"
+          expiration_days: 90
+        - id: "archive_old_checkpoints"
+          status: "Enabled"
+          filter:
+            prefix: "checkpoints/"
+          transition_to_ia_days: 30
+          transition_to_glacier_days: 180
     # DeBERTa config overrides
     model_overrides:
       model_name_or_path: "microsoft/deberta-v3-large"
@@ -286,3 +320,9 @@ environments:
       use_mlflow: true
       use_sagemaker: true
       registry_type: "hf_hub"
+    inference_overrides:
+      log_predictions: true
+      enable_monitoring: false
+      device_preference: "cuda"
+      batch_size: 32
+      max_length: 512

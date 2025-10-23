@@ -12,12 +12,11 @@ from para_detect.entities import (
     ModelRegistrationConfig,
     ModelValidationConfig,
     InferenceConfig,
+    S3Config,
 )
-import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from peft import TaskType
 from para_detect.constants import *
 from para_detect.core.exceptions import ConfigurationError
 from para_detect.utils.helpers import read_yaml
@@ -67,8 +66,8 @@ class ConfigurationManager:
         # Apply inference config overrides
         self._apply_inference_config_overrides(env_config)
 
-        # Apply deployment config overrides
-        self._apply_deployment_config_overrides(env_config)
+        # Apply AWS config overrides
+        self._apply_s3_config_overrides(env_config)
 
     def _apply_base_config_overrides(self, env_config):
         """Apply overrides to base config (existing logic)"""
@@ -174,11 +173,22 @@ class ConfigurationManager:
         if inference_overrides:
             self._deep_merge_dict(self.base_config.inference, inference_overrides)
 
-    def _apply_deployment_config_overrides(self, env_config):
-        """Apply environment-specific overrides to deployment config"""
-        deployment_overrides = env_config.get("deployment_overrides", {})
-        if deployment_overrides:
-            self._deep_merge_dict(self.deployment_config, deployment_overrides)
+    def _apply_s3_config_overrides(self, env_config):
+        """Apply environment-specific overrides to top-level s3 section."""
+        s3_overrides = env_config.get("s3", {})
+        if not s3_overrides:
+            return
+
+        # Start with aws_config.s3 as the base (has all fields)
+        base_s3_config = {}
+        if hasattr(self.aws_config, "s3") and self.aws_config.s3:
+            base_s3_config = dict(self.aws_config.s3)
+
+        # Apply environment overrides on top
+        self._deep_merge_dict(base_s3_config, dict(s3_overrides))
+
+        # Set the merged config to base_config.s3
+        self.base_config.s3 = ConfigBox(base_s3_config)
 
     def _deep_merge_dict(self, target: dict, source: dict):
         """Recursively merge source dict into target dict"""
@@ -201,19 +211,15 @@ class ConfigurationManager:
             self.deberta_config = read_yaml(DEBERTA_CONFIG_FILE_PATH)
             self.training_config = read_yaml(TRAINING_CONFIG_FILE_PATH)
 
-            # Load deployment configs based on environment
-            if self.environment == "production":
-                self.deployment_config = read_yaml(AWS_CONFIG_FILE_PATH)
-            else:
-                # Default to local config for development
-                self.deployment_config = read_yaml(LOCAL_CONFIG_FILE_PATH)
+            # Load AWS config
+            self.aws_config = read_yaml(AWS_CONFIG_FILE_PATH)
 
         except Exception as e:
             print(f"Warning: Error loading additional configs: {e}")
             # Create empty configs as fallback
             self.deberta_config = ConfigBox({})
             self.training_config = ConfigBox({})
-            self.deployment_config = ConfigBox({})
+            self.aws_config = ConfigBox({})
 
     def get_logging_config(self) -> LoggerConfig:
         """Load logging configuration from config.yaml into LoggerConfig entity"""
@@ -305,10 +311,6 @@ class ConfigurationManager:
         """Get data configuration from base config"""
         return self.base_config.get("data", ConfigBox({}))
 
-    def get_deployment_config(self) -> ConfigBox:
-        """Get deployment configuration from environment-specific file"""
-        return self.deployment_config
-
     def get_project_config(self) -> ConfigBox:
         """Get project configuration from base config"""
         return self.base_config.get("project", ConfigBox({}))
@@ -385,21 +387,44 @@ class ConfigurationManager:
         """Get DeBERTa specific configuration"""
         return self.deberta_config
 
-    def get_aws_config(self) -> ConfigBox:
-        """Get AWS deployment configuration"""
+    def get_s3_config(self) -> S3Config:
+        """Get AWS S3 configuration"""
         try:
-            aws_config = read_yaml(AWS_CONFIG_FILE_PATH)
-            return aws_config
-        except Exception:
-            return ConfigBox({})
+            # Priority order: base_config.s3 (with env overrides) > aws_config.s3 > defaults
+            s3_config = None
 
-    def get_local_config(self) -> ConfigBox:
-        """Get local deployment configuration"""
-        try:
-            local_config = read_yaml(LOCAL_CONFIG_FILE_PATH)
-            return local_config
-        except Exception:
-            return ConfigBox({})
+            # First try base_config.s3 (which has environment overrides applied)
+            if hasattr(self.base_config, "s3") and self.base_config.s3:
+                s3_config = self.base_config.s3
+            # Then try aws_config.s3
+            elif hasattr(self.aws_config, "s3") and self.aws_config.s3:
+                s3_config = self.aws_config.s3
+            else:
+                raise ConfigurationError(
+                    "No S3 configuration found in either base_config or aws_config"
+                )
+
+            # Create the S3Config entity with proper type conversion
+            return S3Config(
+                bucket_name=str(s3_config.bucket_name),
+                region=str(s3_config.region),
+                storage_class=str(s3_config.storage_class),
+                enable_versioning=bool(s3_config.enable_versioning),
+                enable_lifecycle=bool(s3_config.enable_lifecycle),
+                folders=dict(s3_config.folders or {}),
+                multipart_threshold=int(s3_config.multipart_threshold),
+                multipart_chunksize=int(s3_config.multipart_chunksize),
+                max_concurrency=int(s3_config.max_concurrency),
+                max_retries=int(s3_config.max_retries),
+                retry_mode=str(s3_config.retry_mode),
+                lifecycle_rules=list(s3_config.lifecycle_rules or []),
+                server_side_encryption=getattr(
+                    s3_config, "server_side_encryption", None
+                ),
+                kms_key_id=getattr(s3_config, "kms_key_id", None),
+            )
+        except Exception as e:
+            raise ConfigurationError(f"Failed to load s3 config: {str(e)}") from e
 
     def get_data_ingestion_config(self) -> DataIngestionConfig:
         """Get data ingestion configuration from config.yaml"""

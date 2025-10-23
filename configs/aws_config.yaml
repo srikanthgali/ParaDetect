@@ -1,0 +1,39 @@
+# AWS S3 Configuration
+s3:
+  bucket_name: "paradetect-s3-bucket"
+  region: "us-east-2"
+  storage_class: "STANDARD"  # STANDARD, STANDARD_IA, GLACIER, DEEP_ARCHIVE
+
+
+  # Folder structure in S3
+  folders:
+    artifacts: "artifacts/"
+    data: "data/"
+
+  # Upload settings
+  multipart_threshold: 64 # MB - files larger than this use multipart upload
+  multipart_chunksize: 16 # MB - size of each part in multipart upload
+  max_concurrency: 10
+
+  # Retry settings
+  max_retries: 3
+  retry_mode: "adaptive"
+
+  server_side_encryption: null  # or "AES256" or "aws:kms"
+  kms_key_id: null
+
+  # Lifecycle settings
+  enable_versioning: true
+  enable_lifecycle: true
+  lifecycle_rules:
+    - id: "delete_old_logs"
+      status: "Enabled"
+      filter:
+        prefix: "logs/"
+      expiration_days: 30
+    - id: "archive_old_checkpoints"
+      status: "Enabled"
+      filter:
+        prefix: "checkpoints/"
+      transition_to_ia_days: 30
+      transition_to_glacier_days: 90

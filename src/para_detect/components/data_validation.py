@@ -3,13 +3,16 @@
 import pandas as pd
 import numpy as np
 import json
+import hashlib
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from datetime import datetime
 
 from para_detect.core.base_component import BaseComponent
+from para_detect.core.config_manager import ConfigurationManager
 from para_detect.core.exceptions import DataValidationError
 from para_detect.entities.data_validation_config import DataValidationConfig
+from para_detect.utils.s3_manager import S3Manager
 
 
 class DataValidation(BaseComponent):
@@ -20,28 +23,57 @@ class DataValidation(BaseComponent):
     before training or inference.
     """
 
-    def __init__(self, config: DataValidationConfig):
+    def __init__(
+        self, config: DataValidationConfig, config_manager: ConfigurationManager = None
+    ):
         """
         Initialize DataValidation component.
 
         Args:
             config: DataValidationConfig object containing validation parameters
+            config_manager: ConfigurationManager for S3 configuration access
         """
-        self.config = config
+        self.validation_config = config
+        self.config_manager = config_manager or ConfigurationManager()
 
-        super().__init__(config)
+        # Pass the config as a dictionary to the base class for backward compatibility
+        super().__init__(config.__dict__)
 
         # Create directories
-        self.config.validation_report_dir.mkdir(parents=True, exist_ok=True)
+        self.validation_config.validation_report_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize S3 manager
+        self._initialize_s3_manager()
 
         self.validation_results = {}
         self.validation_passed = True
 
         self.logger.info("DataValidation component initialized")
 
+    def _initialize_s3_manager(self):
+        """Initialize S3 manager with automatic credential detection."""
+        try:
+            self.s3_manager = S3Manager(config_manager=self.config_manager)
+            self.s3_enabled = True
+
+            # Create bucket if it doesn't exist
+            self.s3_manager.create_bucket_if_not_exists()
+
+            self.logger.info("S3 integration enabled successfully")
+
+            # Log credential info for debugging
+            cred_info = self.s3_manager.get_credential_info()
+            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
+            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
+
+        except Exception as e:
+            self.s3_manager = None
+            self.s3_enabled = False
+            self.logger.warning(f"S3 integration disabled: {e}")
+
     def run(self, data_path: str) -> Tuple[bool, str]:
         """
-        Execute data validation process.
+        Execute data validation process with S3 backup.
 
         Args:
             data_path: Path to the data file to validate
@@ -55,6 +87,22 @@ class DataValidation(BaseComponent):
         try:
             self.logger.info(f"Starting data validation for: {data_path}")
 
+            # Check if validation report exists in S3 cache first
+            local_report_path = None
+            if self.s3_enabled and self._should_use_s3_cache():
+                local_report_path = self._try_download_from_s3_cache(data_path)
+
+            if local_report_path and Path(local_report_path).exists():
+                self.logger.info(
+                    f"Using cached validation report from S3: {local_report_path}"
+                )
+                # Load validation results from cached report
+                validation_passed = self._load_validation_results_from_report(
+                    local_report_path
+                )
+                return validation_passed, local_report_path
+
+            # Proceed with normal validation if no S3 cache
             # Load data
             df = self._load_data(data_path)
 
@@ -67,6 +115,10 @@ class DataValidation(BaseComponent):
 
             # Generate and save validation report
             report_path = self._generate_validation_report(data_path, df)
+
+            # Upload validation report to S3
+            if self.s3_enabled:
+                self._upload_validation_report_to_s3(report_path, data_path)
 
             self.logger.info(
                 f"Data validation completed. Validation passed: {self.validation_passed}"
@@ -423,6 +475,140 @@ class DataValidation(BaseComponent):
         )
 
         return summary
+
+    def _get_s3_cache_key(self, data_path: str) -> str:
+        """Generate S3 cache key for the current validation configuration."""
+        # Create hash based on data file and validation config
+        data_hash = hashlib.md5(data_path.encode()).hexdigest()[:8]
+
+        cache_components = [
+            str(self.validation_config.min_text_length),
+            str(self.validation_config.max_text_length),
+            str(self.validation_config.min_samples_per_class),
+            str(self.validation_config.max_null_percentage),
+            ",".join(str(x) for x in self.validation_config.expected_labels),
+        ]
+
+        config_string = "_".join(cache_components)
+        config_hash = hashlib.md5(config_string.encode()).hexdigest()[:12]
+
+        return f"artifacts/reports/cache/validation_{data_hash}_{config_hash}.json"
+
+    def _should_use_s3_cache(self) -> bool:
+        """Determine if S3 cache should be checked."""
+        return getattr(self.validation_config, "use_s3_cache", True)
+
+    def _try_download_from_s3_cache(self, data_path: str) -> Optional[str]:
+        """Try to download validation report from S3 cache."""
+        try:
+            cache_key = self._get_s3_cache_key(data_path)
+            local_cache_path = (
+                self.validation_config.validation_report_dir
+                / self.validation_config.report_filename
+            )
+
+            self.logger.info(f"Checking S3 cache for validation report: {cache_key}")
+
+            # Check if file exists in S3
+            if not self.s3_manager.file_exists(cache_key, "data"):
+                self.logger.info("No cached validation report found in S3")
+                return None
+
+            # Download cached version
+            success = self.s3_manager.download_file(
+                s3_path=cache_key, local_path=local_cache_path, folder_type="data"
+            )
+
+            if success and local_cache_path.exists():
+                self.logger.info(
+                    "Successfully downloaded cached validation report from S3"
+                )
+                return str(local_cache_path)
+            else:
+                self.logger.warning(
+                    "Failed to download cached validation report from S3"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.warning(f"Error checking S3 cache for validation report: {e}")
+            return None
+
+    def _load_validation_results_from_report(self, report_path: str) -> bool:
+        """Load validation results from a cached report."""
+        try:
+            with open(report_path, "r") as f:
+                report = json.load(f)
+
+            self.validation_results = report.get("validation_results", {})
+            validation_passed = report.get("metadata", {}).get(
+                "validation_passed", False
+            )
+
+            self.logger.info(
+                f"Loaded validation results from cached report: {validation_passed}"
+            )
+            return validation_passed
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error loading validation results from cached report: {e}"
+            )
+            return False
+
+    def _upload_validation_report_to_s3(self, report_path: str, data_path: str) -> bool:
+        """Upload validation report to S3 for backup and caching."""
+        try:
+            # Upload original validation report
+            report_s3_key = "artifacts/reports/data_validation_report.json"
+
+            # Prepare metadata
+            metadata = {
+                "component": "data_validation",
+                "data_path": data_path,
+                "validation_passed": str(self.validation_passed),
+                "total_checks": str(len(self.validation_results)),
+                "passed_checks": str(
+                    sum(
+                        1
+                        for result in self.validation_results.values()
+                        if result.get("validation_passed", False)
+                    )
+                ),
+                "validated_at": datetime.now().isoformat(),
+            }
+
+            # Upload to main artifacts folder
+            success1 = self.s3_manager.upload_file(
+                local_path=report_path,
+                s3_path=report_s3_key,
+                folder_type="artifacts",
+                metadata=metadata,
+            )
+
+            # Upload to cache folder for future use
+            cache_key = self._get_s3_cache_key(data_path)
+            success2 = self.s3_manager.upload_file(
+                local_path=report_path,
+                s3_path=cache_key,
+                folder_type="data",
+                metadata=metadata,
+            )
+
+            if success1:
+                self.logger.info(
+                    f"Successfully uploaded validation report to S3: {report_s3_key}"
+                )
+            if success2:
+                self.logger.info(
+                    f"Successfully cached validation report to S3: {cache_key}"
+                )
+
+            return success1 and success2
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading validation report to S3: {e}")
+            return False
 
     def get_validation_status(self) -> Dict[str, Any]:
         """Get current validation status."""

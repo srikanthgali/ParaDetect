@@ -276,7 +276,7 @@ class DataPipeline(BasePipeline):
         self.logger.info("📥 Step 1: Data Ingestion")
 
         ingestion_config = self.config_manager.get_data_ingestion_config()
-        data_ingestion = DataIngestion(ingestion_config)
+        data_ingestion = DataIngestion(ingestion_config, self.config_manager)
         raw_data_path = data_ingestion.run()
 
         self.logger.info(f"✅ Data ingestion completed: {raw_data_path}")
@@ -292,7 +292,9 @@ class DataPipeline(BasePipeline):
         self.logger.info("🔄 Step 2: Data Preprocessing")
 
         preprocessing_config = self.config_manager.get_data_preprocessing_config()
-        data_preprocessing = DataPreprocessing(preprocessing_config)
+        data_preprocessing = DataPreprocessing(
+            preprocessing_config, self.config_manager
+        )
         processed_data_path = data_preprocessing.run(self.data_paths["raw_data"])
 
         self.logger.info(f"✅ Data preprocessing completed: {processed_data_path}")
@@ -308,7 +310,7 @@ class DataPipeline(BasePipeline):
         self.logger.info("🔍 Step 3: Data Validation")
 
         validation_config = self.config_manager.get_data_validation_config()
-        data_validation = DataValidation(validation_config)
+        data_validation = DataValidation(validation_config, self.config_manager)
         validation_passed, validation_report = data_validation.run(
             self.data_paths["processed_data"]
         )
