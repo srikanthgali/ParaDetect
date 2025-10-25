@@ -43,6 +43,7 @@ from para_detect.entities.model_evaluation_config import ModelEvaluationConfig
 from para_detect.core.exceptions import ModelEvaluationError, DeviceError
 from para_detect.constants import DEVICE_PRIORITY, REVERSE_LABEL_MAPPING
 from para_detect import get_logger
+from para_detect.utils.s3_manager import S3Manager
 
 
 class ModelEvaluator:
@@ -58,14 +59,22 @@ class ModelEvaluator:
     - Prediction confidence analysis
     """
 
-    def __init__(self, config: ModelEvaluationConfig):
+    def __init__(
+        self,
+        config: ModelEvaluationConfig,
+        run_id: str,
+        s3_manager: Optional[S3Manager] = None,
+    ):
         """
         Initialize model evaluator.
 
         Args:
             config: Evaluation configuration
+            run_id: Unique run identifier
+            s3_manager: Optional S3 manager for remote storage
         """
         self.config = config
+        self.run_id = run_id
         self.logger = get_logger(self.__class__.__name__)
 
         # Initialize device
@@ -76,6 +85,10 @@ class ModelEvaluator:
         self.model = None
         self.tokenizer = None
         self.classifier = None
+
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
 
         # Results storage
         self.evaluation_results = {}
@@ -257,6 +270,10 @@ class ModelEvaluator:
             }
 
             self._save_evaluation_results()
+
+            if self.s3_enabled:
+                self._upload_evaluation_results_to_s3(self.evaluation_results)
+
             self.logger.info("✅ Evaluation completed successfully!")
             return self.evaluation_results
 
@@ -793,3 +810,36 @@ class ModelEvaluator:
 
         except Exception as e:
             self.logger.warning(f"Failed to save evaluation results: {str(e)}")
+
+    def _upload_evaluation_results_to_s3(self, results: Dict[str, Any]) -> bool:
+        """Upload evaluation results to S3."""
+        try:
+            if not hasattr(self.config, "evaluation_output_dir"):
+                return False
+
+            metadata = {
+                "accuracy": str(results.get("metrics", {}).get("accuracy", "")),
+                "f1_score": str(results.get("metrics", {}).get("f1", "")),
+                "model_path": str(getattr(self.config, "model_path", "")),
+            }
+
+            # Use S3Manager's component results upload
+            upload_results = self.s3_manager.upload_component_results(
+                results_dir=self.config.evaluation_output_dir,
+                component_name="evaluations",
+                run_id=self.run_id,
+                metadata=metadata,
+            )
+
+            if upload_results["success"]:
+                self.logger.info(
+                    f"Uploaded evaluation results to S3: {upload_results['files_uploaded']} files"
+                )
+                return True
+            else:
+                self.logger.warning("Failed to upload evaluation results to S3")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading evaluation results to S3: {e}")
+            return False

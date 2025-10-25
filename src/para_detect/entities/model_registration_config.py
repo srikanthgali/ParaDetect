@@ -31,6 +31,9 @@ class ModelRegistrationConfig:
     # Local registry configuration
     local_registry_dir: Path = Path("artifacts/model_registry")
 
+    # Registration output configuration
+    registration_output_dir: Path = Path("artifacts/registration")
+
     # Model metadata
     model_description: Optional[str] = None
     model_tags: Optional[Dict[str, str]] = None

@@ -510,59 +510,6 @@ class S3Manager:
             self.logger.error(f"Unexpected error during file deletion: {e}")
             return False
 
-    def upload_directory(
-        self,
-        local_dir: Union[str, Path],
-        s3_prefix: str,
-        folder_type: Optional[str] = None,
-        exclude_patterns: Optional[List[str]] = None,
-    ) -> Dict[str, bool]:
-        """
-        Upload an entire directory to S3.
-
-        Args:
-            local_dir: Local directory path
-            s3_prefix: S3 prefix for uploaded files
-            folder_type: Folder type for automatic prefixing
-            exclude_patterns: List of patterns to exclude
-
-        Returns:
-            Dictionary mapping local file paths to upload success status
-        """
-        local_dir = Path(local_dir)
-        exclude_patterns = exclude_patterns or []
-        results = {}
-
-        if not local_dir.exists() or not local_dir.is_dir():
-            self.logger.error(
-                f"Local directory not found or not a directory: {local_dir}"
-            )
-            return results
-
-        # Find all files to upload
-        for file_path in local_dir.rglob("*"):
-            if file_path.is_file():
-                # Check exclusion patterns
-                relative_path = file_path.relative_to(local_dir)
-                if any(pattern in str(relative_path) for pattern in exclude_patterns):
-                    continue
-
-                # Generate S3 key
-                s3_file_path = f"{s3_prefix.rstrip('/')}/{relative_path}".replace(
-                    "\\", "/"
-                )
-
-                # Upload file
-                success = self.upload_file(file_path, s3_file_path, folder_type)
-                results[str(file_path)] = success
-
-        successful_uploads = sum(1 for success in results.values() if success)
-        self.logger.info(
-            f"Directory upload completed: {successful_uploads}/{len(results)} files uploaded"
-        )
-
-        return results
-
     def sync_directory(
         self,
         local_dir: Union[str, Path],
@@ -681,77 +628,424 @@ class S3Manager:
         """
         return self.get_file_metadata(s3_path, folder_type) is not None
 
+    def upload_directory_with_structure(
+        self,
+        local_dir: Union[str, Path],
+        s3_prefix: str,
+        folder_type: Optional[str] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        preserve_empty_dirs: bool = True,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Upload an entire directory to S3 with complete directory structure preservation.
 
-# Convenience functions for common operations
-def get_s3_manager() -> S3Manager:
-    """Get a configured S3Manager instance."""
-    return S3Manager()
+        Args:
+            local_dir: Local directory path
+            s3_prefix: S3 prefix for uploaded files
+            folder_type: Folder type for automatic prefixing
+            exclude_patterns: List of patterns to exclude
+            preserve_empty_dirs: Whether to preserve empty directories using .keep placeholders
+            metadata: Additional metadata to store with files
 
+        Returns:
+            Dictionary with upload results and statistics
+        """
+        local_dir = Path(local_dir)
+        exclude_patterns = exclude_patterns or []
+        results = {
+            "files_uploaded": 0,
+            "directories_created": 0,
+            "total_files": 0,
+            "total_directories": 0,
+            "failed_uploads": 0,
+            "success": True,
+            "details": {},
+        }
 
-def upload_model_checkpoint(
-    checkpoint_path: Union[str, Path], model_name: str, version: str
-) -> bool:
-    """
-    Upload model checkpoint to S3.
+        if not local_dir.exists() or not local_dir.is_dir():
+            self.logger.error(
+                f"Local directory not found or not a directory: {local_dir}"
+            )
+            results["success"] = False
+            return results
 
-    Args:
-        checkpoint_path: Local path to checkpoint
-        model_name: Name of the model
-        version: Version/timestamp of the checkpoint
+        self.logger.info(
+            f"Uploading directory structure from {local_dir} to S3: {s3_prefix}"
+        )
 
-    Returns:
-        True if upload successful
-    """
-    s3_manager = get_s3_manager()
-    s3_path = f"{model_name}/{version}/"
+        # First pass: handle empty directories if requested
+        if preserve_empty_dirs:
+            self._upload_empty_directories(
+                local_dir, s3_prefix, folder_type, exclude_patterns, metadata, results
+            )
 
-    if Path(checkpoint_path).is_dir():
-        results = s3_manager.upload_directory(checkpoint_path, s3_path, "checkpoints")
-        return all(results.values())
-    else:
-        filename = Path(checkpoint_path).name
-        s3_file_path = f"{s3_path}{filename}"
-        return s3_manager.upload_file(checkpoint_path, s3_file_path, "checkpoints")
+        # Second pass: upload all actual files
+        self._upload_directory_files(
+            local_dir, s3_prefix, folder_type, exclude_patterns, metadata, results
+        )
 
+        # Log summary
+        self.logger.info(
+            f"Directory upload completed: {results['files_uploaded']}/{results['total_files']} files, "
+            f"{results['directories_created']}/{results['total_directories']} empty directories"
+        )
 
-def download_model_checkpoint(
-    model_name: str, version: str, local_path: Union[str, Path]
-) -> bool:
-    """
-    Download model checkpoint from S3.
+        if results["failed_uploads"] > 0:
+            self.logger.warning(f"Failed uploads: {results['failed_uploads']}")
+            results["success"] = False
 
-    Args:
-        model_name: Name of the model
-        version: Version/timestamp of the checkpoint
-        local_path: Local destination path
+        return results
 
-    Returns:
-        True if download successful
-    """
-    s3_manager = get_s3_manager()
-    s3_path = f"{model_name}/{version}/"
+    def _upload_empty_directories(
+        self,
+        local_dir: Path,
+        s3_prefix: str,
+        folder_type: Optional[str],
+        exclude_patterns: List[str],
+        metadata: Optional[Dict[str, str]],
+        results: Dict[str, Any],
+    ) -> None:
+        """Upload placeholder files for empty directories."""
+        try:
+            # Find all directories
+            all_dirs = sorted([p for p in local_dir.rglob("*") if p.is_dir()])
+            results["total_directories"] = len(all_dirs)
 
-    # List files in checkpoint directory
-    files = s3_manager.list_files(s3_path, "checkpoints")
+            for dir_path in all_dirs:
+                # Skip if matches exclusion patterns
+                relative_dir_path = dir_path.relative_to(local_dir)
+                if any(
+                    pattern in str(relative_dir_path) for pattern in exclude_patterns
+                ):
+                    continue
 
-    if not files:
-        return False
+                # Check if directory is empty
+                try:
+                    is_empty = next(dir_path.iterdir(), None) is None
+                except (PermissionError, OSError):
+                    is_empty = False
 
-    # Download all files
-    local_path = Path(local_path)
-    local_path.mkdir(parents=True, exist_ok=True)
+                if is_empty:
+                    # Create placeholder file
+                    placeholder_path = dir_path / ".keep"
+                    placeholder_created = False
 
-    success_count = 0
-    for file_info in files:
-        # Extract relative path
-        full_key = file_info["key"]
-        prefix = s3_manager._get_s3_key(s3_path, "checkpoints")
-        relative_path = full_key.replace(prefix, "", 1).lstrip("/")
+                    try:
+                        # Create temporary placeholder
+                        placeholder_path.touch(exist_ok=True)
+                        placeholder_created = True
 
-        local_file_path = local_path / relative_path
-        local_file_path.parent.mkdir(parents=True, exist_ok=True)
+                        # Upload placeholder
+                        relative_placeholder_path = placeholder_path.relative_to(
+                            local_dir
+                        )
+                        s3_file_path = f"{s3_prefix.rstrip('/')}/{relative_placeholder_path.as_posix()}"
 
-        if s3_manager.download_file(relative_path, local_file_path, "checkpoints"):
-            success_count += 1
+                        # Add metadata indicating this is a directory placeholder
+                        placeholder_metadata = (metadata or {}).copy()
+                        placeholder_metadata.update(
+                            {
+                                "directory_placeholder": "true",
+                                "created_by": "s3_manager",
+                                "purpose": "preserve_empty_directory_structure",
+                            }
+                        )
 
-    return success_count == len(files)
+                        success = self.upload_file(
+                            str(placeholder_path),
+                            s3_file_path,
+                            folder_type,
+                            placeholder_metadata,
+                        )
+
+                        if success:
+                            results["directories_created"] += 1
+                            results["details"][
+                                str(relative_dir_path)
+                            ] = "empty_directory_preserved"
+                        else:
+                            results["failed_uploads"] += 1
+                            self.logger.warning(
+                                f"Failed to upload placeholder for {relative_dir_path}"
+                            )
+
+                    finally:
+                        # Clean up temporary placeholder
+                        if placeholder_created:
+                            try:
+                                if placeholder_path.exists():
+                                    placeholder_path.unlink()
+                            except (PermissionError, OSError) as e:
+                                self.logger.warning(
+                                    f"Could not remove temporary placeholder {placeholder_path}: {e}"
+                                )
+
+        except Exception as e:
+            self.logger.error(f"Error handling empty directories: {e}")
+            results["failed_uploads"] += 1
+
+    def _upload_directory_files(
+        self,
+        local_dir: Path,
+        s3_prefix: str,
+        folder_type: Optional[str],
+        exclude_patterns: List[str],
+        metadata: Optional[Dict[str, str]],
+        results: Dict[str, Any],
+    ) -> None:
+        """Upload all actual files in the directory."""
+        try:
+            # Find all files to upload
+            all_files = [p for p in local_dir.rglob("*") if p.is_file()]
+            results["total_files"] = len(all_files)
+
+            for file_path in all_files:
+                # Skip if matches exclusion patterns
+                relative_path = file_path.relative_to(local_dir)
+                if any(pattern in str(relative_path) for pattern in exclude_patterns):
+                    continue
+
+                # Generate S3 key
+                s3_file_path = f"{s3_prefix.rstrip('/')}/{relative_path.as_posix()}"
+
+                # Upload file
+                success = self.upload_file(
+                    file_path, s3_file_path, folder_type, metadata
+                )
+
+                if success:
+                    results["files_uploaded"] += 1
+                    results["details"][str(relative_path)] = "file_uploaded"
+                else:
+                    results["failed_uploads"] += 1
+                    self.logger.warning(f"Failed to upload file {relative_path}")
+
+        except Exception as e:
+            self.logger.error(f"Error uploading directory files: {e}")
+            results["failed_uploads"] += 1
+
+    def download_directory_with_structure(
+        self,
+        s3_prefix: str,
+        local_dir: Union[str, Path],
+        folder_type: Optional[str] = None,
+        clean_placeholders: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Download directory structure from S3, handling placeholder files appropriately.
+
+        Args:
+            s3_prefix: S3 prefix to download from
+            local_dir: Local destination directory
+            folder_type: Folder type for automatic prefixing
+            clean_placeholders: Whether to remove .keep placeholder files after download
+
+        Returns:
+            Dictionary with download results and statistics
+        """
+        local_dir = Path(local_dir)
+        results = {
+            "files_downloaded": 0,
+            "directories_created": 0,
+            "placeholders_cleaned": 0,
+            "total_files": 0,
+            "failed_downloads": 0,
+            "success": True,
+            "details": {},
+        }
+
+        try:
+            # Create destination directory
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            # List all files in S3 prefix
+            files = self.list_files(s3_prefix, folder_type)
+            results["total_files"] = len(files)
+
+            if not files:
+                self.logger.warning(f"No files found in S3 prefix: {s3_prefix}")
+                return results
+
+            self.logger.info(f"Downloading {len(files)} files from S3 to {local_dir}")
+
+            # Download each file
+            placeholders_to_clean = []
+            s3_prefix_full = self._get_s3_key(s3_prefix, folder_type)
+
+            for file_info in files:
+                file_key = file_info["key"]
+
+                # Calculate relative path
+                if file_key.startswith(s3_prefix_full):
+                    relative_path = file_key[len(s3_prefix_full) :].lstrip("/")
+                else:
+                    relative_path = Path(file_key).name
+
+                local_file_path = local_dir / relative_path
+
+                # Create parent directories
+                local_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Download file
+                success = self.download_file(
+                    file_key, local_file_path, folder_type=None
+                )  # Key already has folder prefix
+
+                if success:
+                    results["files_downloaded"] += 1
+                    results["details"][relative_path] = "file_downloaded"
+
+                    # Check if this is a placeholder file
+                    if local_file_path.name == ".keep" and clean_placeholders:
+                        # Get file metadata to confirm it's a placeholder
+                        file_metadata = self.get_file_metadata(
+                            file_key, folder_type=None
+                        )
+                        if (
+                            file_metadata
+                            and file_metadata.get("metadata", {}).get(
+                                "directory_placeholder"
+                            )
+                            == "true"
+                        ):
+                            placeholders_to_clean.append(local_file_path)
+                else:
+                    results["failed_downloads"] += 1
+                    self.logger.warning(f"Failed to download file {relative_path}")
+
+            # Clean up placeholder files if requested
+            if clean_placeholders:
+                for placeholder_path in placeholders_to_clean:
+                    try:
+                        if placeholder_path.exists():
+                            placeholder_path.unlink()
+                            results["placeholders_cleaned"] += 1
+                            results["details"][
+                                str(placeholder_path.relative_to(local_dir))
+                            ] = "placeholder_cleaned"
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Could not remove placeholder {placeholder_path}: {e}"
+                        )
+
+            # Count directories created
+            for path in local_dir.rglob("*"):
+                if path.is_dir():
+                    results["directories_created"] += 1
+
+            self.logger.info(
+                f"Directory download completed: {results['files_downloaded']}/{results['total_files']} files, "
+                f"{results['directories_created']} directories created, "
+                f"{results['placeholders_cleaned']} placeholders cleaned"
+            )
+
+            if results["failed_downloads"] > 0:
+                results["success"] = False
+
+        except Exception as e:
+            self.logger.error(f"Error downloading directory structure: {e}")
+            results["success"] = False
+
+        return results
+
+    def upload_training_run(
+        self,
+        run_dir: Union[str, Path],
+        run_id: str,
+        backup_type: str = "complete",
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Upload a complete training run directory to S3 with proper structure preservation.
+
+        Args:
+            run_dir: Local training run directory
+            run_id: Training run identifier
+            backup_type: Type of backup ("complete", "partial", "checkpoint")
+            metadata: Additional metadata to store with files
+
+        Returns:
+            Dictionary with upload results and statistics
+        """
+        run_dir = Path(run_dir)
+        s3_prefix = f"artifacts/training/{backup_type}_runs/{run_id}"
+
+        # Prepare metadata
+        upload_metadata = {
+            "component": f"training_pipeline_{backup_type}",
+            "run_id": run_id,
+            "backup_type": backup_type,
+            "uploaded_at": datetime.now().isoformat(),
+        }
+        if metadata:
+            upload_metadata.update(metadata)
+
+        self.logger.info(f"Uploading training run {run_id} to S3: {s3_prefix}")
+
+        # Use the enhanced directory upload with structure preservation
+        results = self.upload_directory_with_structure(
+            local_dir=run_dir,
+            s3_prefix=s3_prefix,
+            folder_type="artifacts",
+            exclude_patterns=[".git", "__pycache__", "*.pyc", ".DS_Store"],
+            preserve_empty_dirs=True,
+            metadata=upload_metadata,
+        )
+
+        # Add training run specific information to results
+        results.update(
+            {
+                "run_id": run_id,
+                "backup_type": backup_type,
+                "s3_prefix": s3_prefix,
+            }
+        )
+
+        return results
+
+    def upload_component_results(
+        self,
+        results_dir: Union[str, Path],
+        component_name: str,
+        run_id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Upload component results directory to S3.
+
+        Args:
+            results_dir: Local results directory
+            component_name: Name of the component (evaluation, validation, registration)
+            run_id: Training run identifier (optional)
+            metadata: Additional metadata
+
+        Returns:
+            Dictionary with upload results
+        """
+        results_dir = Path(results_dir)
+
+        if run_id:
+            s3_prefix = f"artifacts/training/{run_id}/{component_name}"
+        else:
+            s3_prefix = f"artifacts/training/{component_name}"
+
+        # Prepare metadata
+        upload_metadata = {
+            "component": f"training_pipeline_{component_name}",
+            "uploaded_at": datetime.now().isoformat(),
+        }
+        if run_id:
+            upload_metadata["run_id"] = run_id
+        if metadata:
+            upload_metadata.update(metadata)
+
+        self.logger.info(f"Uploading {component_name} results to S3: {s3_prefix}")
+
+        return self.upload_directory_with_structure(
+            local_dir=results_dir,
+            s3_prefix=s3_prefix,
+            folder_type="artifacts",
+            preserve_empty_dirs=True,
+            metadata=upload_metadata,
+        )

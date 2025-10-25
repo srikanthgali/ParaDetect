@@ -36,6 +36,7 @@ model:
     save_metadata: true
     save_config: true
     save_tokenizer: true
+    use_s3_cache: true
 
     # Version control
     create_model_card: true

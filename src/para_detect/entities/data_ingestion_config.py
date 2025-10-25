@@ -13,6 +13,7 @@ class DataIngestionConfig:
     dataset_filename: str
     sample_size: Optional[int] = None
     random_state: int = 42
+    use_s3_cache: bool = False
 
     def __post_init__(self):
         """Validate configuration after initialization"""

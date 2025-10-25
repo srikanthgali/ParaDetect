@@ -20,6 +20,7 @@ class DataPreprocessingConfig:
     processed_data_dir: Path
     processed_filename: str
     random_state: int = 42
+    use_s3_cache: bool = False
 
     def __post_init__(self):
         """Validate configuration after initialization"""

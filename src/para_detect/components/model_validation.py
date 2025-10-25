@@ -9,6 +9,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional, Union
 from datetime import datetime
+from para_detect.utils.s3_manager import S3Manager
+from para_detect.utils.helpers import convert_to_serializable
 from sklearn.metrics import (
     accuracy_score,
     precision_recall_fscore_support,
@@ -40,15 +42,26 @@ class ModelValidator:
     - Statistical significance tests
     """
 
-    def __init__(self, config: ModelValidationConfig):
+    def __init__(
+        self,
+        config: ModelValidationConfig,
+        run_id: str,
+        s3_manager: Optional[S3Manager] = None,
+    ):
         """
         Initialize model validator.
 
         Args:
             config: Validation configuration
+            s3_manager: Optional S3 manager for remote storage
         """
         self.config = config
+        self.run_id = run_id
         self.logger = get_logger(self.__class__.__name__)
+
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
 
         # Validation results
         self.validation_results = {}
@@ -167,6 +180,9 @@ class ModelValidator:
             if self.validation_warnings:
                 for warning in self.validation_warnings:
                     self.logger.warning(f"   Warning: {warning}")
+
+            if self.s3_enabled and hasattr(self, "validation_results"):
+                self._upload_validation_results_to_s3(self.validation_results)
 
             return self.validation_results
 
@@ -582,37 +598,13 @@ class ModelValidator:
             else:
                 return f"Model has {len(self.validation_issues)} critical issues. Address all issues before proceeding with registration."
 
-    def _convert_to_serializable(self, obj: Any) -> Any:
-        """Convert numpy types and other non-serializable types to JSON-serializable formats."""
-        if isinstance(obj, dict):
-            return {
-                key: self._convert_to_serializable(value) for key, value in obj.items()
-            }
-        elif isinstance(obj, (list, tuple)):
-            return [self._convert_to_serializable(item) for item in obj]
-        elif isinstance(obj, (np.integer, np.int64, np.int32)):
-            return int(obj)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
-            return float(obj)
-        elif isinstance(obj, (np.bool_, bool)):
-            return bool(obj)
-        elif isinstance(obj, np.ndarray):
-            return self._convert_to_serializable(obj.tolist())
-        elif hasattr(obj, "__dict__"):
-            # Handle custom objects
-            return self._convert_to_serializable(obj.__dict__)
-        else:
-            return obj
-
     def _save_validation_report(self) -> None:
         """Save detailed validation report."""
         try:
             report_path = self.config.validation_output_dir / "validation_report.json"
 
             # Convert to serializable format
-            serializable_results = self._convert_to_serializable(
-                self.validation_results
-            )
+            serializable_results = convert_to_serializable(self.validation_results)
 
             with open(report_path, "w") as f:
                 json.dump(serializable_results, f, indent=2, default=str)
@@ -673,3 +665,40 @@ class ModelValidator:
 
         except Exception as e:
             self.logger.warning(f"Failed to save validation report: {str(e)}")
+
+    def _upload_validation_results_to_s3(self, results: Dict[str, Any]) -> bool:
+        """Upload validation results to S3."""
+        try:
+            if not hasattr(self.config, "validation_output_dir"):
+                return False
+
+            metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+            metadata = {
+                "accuracy": str(metrics.get("accuracy", "")),
+                "f1_score": str(metrics.get("f1", "")),
+                "validation_passed": str(results.get("validation_passed", "")),
+                "validation_issues_count": str(
+                    len(results.get("validation_issues", []))
+                ),
+                "model_path": str(getattr(self.config, "model_path", "")),
+            }
+
+            upload_results = self.s3_manager.upload_component_results(
+                results_dir=self.config.validation_output_dir,
+                component_name="validations",
+                run_id=self.run_id,
+                metadata=metadata,
+            )
+
+            if upload_results.get("success"):
+                self.logger.info(
+                    f"Uploaded validation results to S3: {upload_results.get('files_uploaded', 0)} files"
+                )
+                return True
+            else:
+                self.logger.warning("Failed to upload validation results to S3")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading validation results to S3: {e}")
+            return False

@@ -38,7 +38,8 @@ try:
 except ImportError:
     SAGEMAKER_AVAILABLE = False
 
-import torch
+from para_detect.utils.helpers import convert_to_serializable
+from para_detect.utils.s3_manager import S3Manager
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from para_detect.entities.model_registration_config import ModelRegistrationConfig
@@ -59,7 +60,12 @@ class ModelRegistrar:
     - Version management
     """
 
-    def __init__(self, config: ModelRegistrationConfig):
+    def __init__(
+        self,
+        config: ModelRegistrationConfig,
+        run_id: str,
+        s3_manager: Optional[S3Manager] = None,
+    ):
         """
         Initialize model registrar.
 
@@ -67,7 +73,12 @@ class ModelRegistrar:
             config: Registration configuration
         """
         self.config = config
+        self.run_id = run_id
         self.logger = get_logger(self.__class__.__name__)
+
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
 
         # Registration results
         self.registration_results = {}
@@ -84,6 +95,8 @@ class ModelRegistrar:
         """
         try:
             self.logger.info("📦 Starting model registration...")
+
+            self.config.registration_output_dir.mkdir(parents=True, exist_ok=True)
 
             # Check validation requirement
             if self.config.require_validation_pass and not validation_passed:
@@ -102,7 +115,7 @@ class ModelRegistrar:
             metadata = metadata or {}
 
             # Ensure metadata is JSON serializable from the start
-            metadata = self._make_json_serializable(metadata)
+            metadata = convert_to_serializable(metadata)
 
             # Initialize results
             results = {
@@ -178,6 +191,20 @@ class ModelRegistrar:
                     self.logger.warning(f"⚠️ Model card generation failed: {str(e)}")
 
             self.registration_results = results
+
+            results_file_path = (
+                self.config.registration_output_dir / f"registration_results.json"
+            )
+            # Convert to serializable format
+            serializable_results = convert_to_serializable(self.registration_results)
+
+            with open(results_file_path, "w") as f:
+                json.dump(serializable_results, f, indent=2, default=str)
+
+            if self.s3_enabled and hasattr(self, "registration_results"):
+                self._upload_registration_results_to_s3(
+                    self.registration_results, model_path
+                )
 
             if results["success"]:
                 self.logger.info("✅ Model registration completed successfully")
@@ -365,6 +392,7 @@ class ModelRegistrar:
             # Create version directory in the configured registry location
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             version_dir = self.config.local_registry_dir / timestamp
+            self.version_dir = version_dir
             version_dir.mkdir(parents=True, exist_ok=True)
 
             if self.config.dry_run:
@@ -400,7 +428,7 @@ class ModelRegistrar:
             }
 
             # Convert any non-serializable objects to serializable formats
-            metadata_enhanced = self._make_json_serializable(metadata_enhanced)
+            metadata_enhanced = convert_to_serializable(metadata_enhanced)
 
             # Save metadata
             metadata_path = version_dir / "metadata.json"
@@ -423,6 +451,13 @@ class ModelRegistrar:
             # Create a "latest" marker file instead of symlink
             self._update_latest_marker(timestamp, version_dir)
 
+            # Upload the registered model to S3
+            s3_upload_success = False
+            if self.s3_enabled:
+                s3_upload_success = self._upload_registered_model_to_s3(
+                    version_dir, timestamp, metadata_enhanced
+                )
+
             return {
                 "status": "success",
                 "version": timestamp,
@@ -431,6 +466,8 @@ class ModelRegistrar:
                 "model_path": str(model_dest),
                 "tokenizer_path": str(tokenizer_dest),
                 "registry_location": str(self.config.local_registry_dir),
+                "s3_upload_success": s3_upload_success,
+                "s3_enabled": self.s3_enabled,
             }
 
         except Exception as e:
@@ -524,6 +561,163 @@ class ModelRegistrar:
             self.logger.warning(f"Failed to get model by version {version}: {str(e)}")
             return None
 
+    def _upload_registered_model_to_s3(
+        self, version_dir: Path, version: str, metadata: Dict[str, Any]
+    ) -> bool:
+        """Upload the registered model directory to S3."""
+        try:
+            if not self.s3_enabled:
+                self.logger.warning("S3 not enabled - skipping model upload")
+                return False
+
+            self.logger.info(f"📤 Uploading registered model to S3: version {version}")
+
+            # S3 key for the registered model
+            s3_prefix = f"artifacts/model_registry/{version}"
+
+            # Prepare S3 metadata
+            s3_metadata = {
+                "component": "model_registration",
+                "version": version,
+                "run_id": self.run_id,
+                "registry_type": "production",
+                "production_ready": "true",
+                "model_name": str(metadata.get("model_name", "")),
+                "accuracy": str(metadata.get("metrics", {}).get("accuracy", "")),
+                "f1_score": str(metadata.get("metrics", {}).get("f1", "")),
+                "license": str(self.config.license or ""),
+                "uploaded_at": datetime.now().isoformat(),
+            }
+
+            # Use S3Manager's enhanced directory upload
+            upload_results = self.s3_manager.upload_directory_with_structure(
+                local_dir=version_dir,
+                s3_prefix=s3_prefix,
+                folder_type="artifacts",
+                exclude_patterns=[".git", "__pycache__", "*.pyc", ".DS_Store", "*.tmp"],
+                preserve_empty_dirs=True,
+                metadata=s3_metadata,
+            )
+
+            if upload_results["success"]:
+                self.logger.info(
+                    f"✅ Successfully uploaded registered model to S3: {s3_prefix}"
+                )
+                self.logger.info(
+                    f"   📊 Upload stats: {upload_results['files_uploaded']} files, "
+                    f"{upload_results['directories_created']} directories"
+                )
+
+                return True
+            else:
+                self.logger.warning("❌ Failed to upload registered model to S3")
+                if upload_results.get("failed_uploads", 0) > 0:
+                    self.logger.warning(
+                        f"   Failed uploads: {upload_results['failed_uploads']}"
+                    )
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading registered model to S3: {e}")
+            return False
+
+    def _upload_registration_results_to_s3(
+        self, results: Dict[str, Any], model_path: str
+    ) -> bool:
+        """Upload complete registration results to S3."""
+        try:
+            # Upload the entire local registry directory structure
+            registry_upload_success = self._upload_complete_registry_to_s3()
+
+            # Upload individual registration results
+            component_upload_success = (
+                self._upload_component_registration_results_to_s3(results, model_path)
+            )
+
+            return registry_upload_success and component_upload_success
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading registration results to S3: {e}")
+            return False
+
+    def _upload_complete_registry_to_s3(self) -> bool:
+        """Upload the complete local registry to S3."""
+        try:
+            if not self.version_dir.exists():
+                return True  # Nothing to upload
+
+            s3_prefix = f"artifacts/model_registry/{self.version_dir}"
+
+            self.logger.info(f"📂 Uploading complete model registry to S3: {s3_prefix}")
+
+            # Prepare metadata for registry backup
+            registry_metadata = {
+                "component": "complete_model_registry",
+                "run_id": self.run_id,
+                "backup_type": "complete_registry",
+                "backup_timestamp": datetime.now().isoformat(),
+                "registry_location": str(self.version_dir),
+            }
+
+            # Upload entire registry directory
+            upload_results = self.s3_manager.upload_directory_with_structure(
+                local_dir=self.version_dir,
+                s3_prefix=s3_prefix,
+                folder_type="artifacts",
+                exclude_patterns=[".git", "__pycache__", "*.pyc", ".DS_Store", "*.tmp"],
+                preserve_empty_dirs=True,
+                metadata=registry_metadata,
+            )
+
+            if upload_results["success"]:
+                self.logger.info(
+                    f"✅ Complete registry uploaded to S3: {upload_results['files_uploaded']} files"
+                )
+                return True
+            else:
+                self.logger.warning("❌ Failed to upload complete registry to S3")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading complete registry to S3: {e}")
+            return False
+
+    def _upload_component_registration_results_to_s3(
+        self, results: Dict[str, Any], model_path: str
+    ) -> bool:
+        """Upload component-specific registration results to S3."""
+        try:
+            regs = results.get("registrations", {}) if isinstance(results, dict) else {}
+            errors = results.get("errors", {}) if isinstance(results, dict) else {}
+
+            metadata = {
+                "registration_success": str(results.get("success", "")),
+                "registrations_count": str(len(regs)),
+                "errors_count": str(len(errors)),
+                "model_path": str(model_path),
+                "registered_at": datetime.now().isoformat(),
+            }
+
+            upload_results = self.s3_manager.upload_component_results(
+                results_dir=self.config.registration_output_dir,
+                component_name="registrations",
+                run_id=self.run_id,
+                metadata=metadata,
+            )
+
+            if upload_results.get("success"):
+                self.logger.info(
+                    f"Uploaded registration results to S3: {upload_results.get('files_uploaded', 0)} files"
+                )
+                return True
+            else:
+                self.logger.warning("Failed to upload registration results to S3")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading registration results to S3: {e}")
+            return False
+
     def _update_local_registry_index(self, version: str, metadata: Dict[str, Any]):
         """Update local registry index."""
         index_path = self.config.local_registry_dir / "registry_index.json"
@@ -536,7 +730,7 @@ class ModelRegistrar:
             index = {"models": [], "latest": None}
 
         # Add new entry with JSON serializable metadata
-        serializable_metadata = self._make_json_serializable(metadata)
+        serializable_metadata = convert_to_serializable(metadata)
 
         index["models"].append(
             {
@@ -554,24 +748,6 @@ class ModelRegistrar:
         # Save index
         with open(index_path, "w") as f:
             json.dump(index, f, indent=2)
-
-    def _make_json_serializable(self, obj):
-        """Convert object to JSON serializable format."""
-        if isinstance(obj, dict):
-            return {k: self._make_json_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [self._make_json_serializable(item) for item in obj]
-        elif isinstance(obj, (bool, int, float, str, type(None))):
-            return obj
-        elif hasattr(obj, "__dict__"):
-            return self._make_json_serializable(obj.__dict__)
-        elif hasattr(obj, "tolist"):  # numpy arrays
-            return obj.tolist()
-        elif hasattr(obj, "item"):  # numpy scalars
-            return obj.item()
-        else:
-            # Convert to string as fallback
-            return str(obj)
 
     def _create_hf_model_card(self, repo_id: str, metadata: Dict[str, Any]):
         """Create model card for Hugging Face Hub."""

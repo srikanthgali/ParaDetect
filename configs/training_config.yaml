@@ -154,6 +154,9 @@ registration:
   # Local registry configuration
   local_registry_dir: "artifacts/model_registry"
 
+  # Registration output configuration
+  registration_output_dir: "artifacts/registration"
+
   # Model metadata
   model_description: "DeBERTa-v3-Large fine-tuned for AI vs Human text detection using LoRA"
   model_tags:

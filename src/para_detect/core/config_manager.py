@@ -351,6 +351,8 @@ class ConfigurationManager:
                 state_auto_save=bool(pipeline_config.state_auto_save),
                 state_retention_days=int(pipeline_config.state_retention_days),
                 enable_pipeline_locks=bool(pipeline_config.enable_pipeline_locks),
+                use_s3_cache=bool(pipeline_config.use_s3_cache),
+                s3_backup_enabled=bool(pipeline_config.s3_backup_enabled),
             )
 
         except Exception as e:
@@ -380,6 +382,8 @@ class ConfigurationManager:
                 state_auto_save=True,
                 state_retention_days=30,
                 enable_pipeline_locks=True,
+                use_s3_cache=True,
+                s3_backup_enabled=True,
             )
 
     # Additional convenience methods for specific configs
@@ -444,6 +448,7 @@ class ConfigurationManager:
                     else None
                 ),
                 random_state=int(ingestion_config.random_state),
+                use_s3_cache=bool(ingestion_config.use_s3_cache),
             )
 
         except Exception as e:
@@ -470,6 +475,7 @@ class ConfigurationManager:
                 processed_data_dir=Path(preprocessing_config.processed_data_dir),
                 processed_filename=preprocessing_config.processed_filename,
                 random_state=int(preprocessing_config.random_state),
+                use_s3_cache=bool(preprocessing_config.use_s3_cache),
             )
 
         except Exception as e:
@@ -494,6 +500,7 @@ class ConfigurationManager:
                 max_null_percentage=float(validation_config.max_null_percentage),
                 validation_report_dir=Path(validation_config.validation_report_dir),
                 report_filename=validation_config.report_filename,
+                use_s3_cache=bool(validation_config.use_s3_cache),
             )
 
         except Exception as e:
@@ -630,6 +637,7 @@ class ConfigurationManager:
                 save_metadata=bool(model_config.saving.save_metadata),
                 save_config=bool(model_config.saving.save_config),
                 save_tokenizer=bool(model_config.saving.save_tokenizer),
+                use_s3_cache=bool(model_config.saving.use_s3_cache),
                 create_model_card=bool(model_config.saving.create_model_card),
                 save_training_args=bool(model_config.saving.save_training_args),
                 dataloader_num_workers=int(training_config.dataloader_num_workers),
@@ -738,6 +746,9 @@ class ConfigurationManager:
                 sagemaker_bucket=registration_config.sagemaker_bucket,
                 sagemaker_model_name=registration_config.sagemaker_model_name,
                 local_registry_dir=Path(registration_config.local_registry_dir),
+                registration_output_dir=Path(
+                    registration_config.registration_output_dir
+                ),
                 model_description=registration_config.model_description,
                 model_tags=registration_config.model_tags,
                 license=registration_config.license,

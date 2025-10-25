@@ -17,6 +17,7 @@ from para_detect.components.data_validation import DataValidation
 from para_detect.core.exceptions import ParaDetectException
 from para_detect import get_logger
 from para_detect.entities.pipeline_config import PipelineType
+from para_detect.utils.s3_manager import S3Manager
 
 
 class DataPipeline(BasePipeline):
@@ -30,16 +31,28 @@ class DataPipeline(BasePipeline):
     - Configurable force rerun options
     """
 
-    def __init__(self, config_manager: Optional[ConfigurationManager] = None):
+    def __init__(
+        self,
+        config_manager: Optional[ConfigurationManager] = None,
+        s3_manager: Optional[S3Manager] = None,
+    ):
         """
         Initialize data pipeline with pipeline-specific state management.
 
         Args:
             config_manager: Optional configuration manager. If None, creates new instance.
+            s3_manager: Pre-initialized S3Manager instance (optional)
         """
         self.config_manager = config_manager or ConfigurationManager()
         super().__init__(PipelineType.DATA, config_manager)
         self.logger = get_logger(self.__class__.__name__)
+
+        self.s3_manager = s3_manager
+        if self.s3_manager:
+            self.s3_enabled = True
+            self.logger.info("Using shared S3Manager for data pipeline")
+        else:
+            self._initialize_s3_manager()
 
         # Pipeline state tracking
         self.pipeline_state = {
@@ -144,6 +157,28 @@ class DataPipeline(BasePipeline):
             )
 
         return should_skip
+
+    def _initialize_s3_manager(self):
+        """Initialize S3 manager for data pipeline."""
+        try:
+
+            self.s3_manager = S3Manager(config_manager=self.config_manager)
+            self.s3_enabled = True
+
+            # Create bucket if it doesn't exist
+            self.s3_manager.create_bucket_if_not_exists()
+
+            self.logger.info("S3 integration enabled for training pipeline")
+
+            # Log credential info for debugging
+            cred_info = self.s3_manager.get_credential_info()
+            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
+            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
+
+        except Exception as e:
+            self.s3_manager = None
+            self.s3_enabled = False
+            self.logger.warning(f"S3 integration disabled for training pipeline: {e}")
 
     def run_full_pipeline(
         self, force_rerun: bool = False, force_steps: Optional[list] = None
@@ -276,7 +311,7 @@ class DataPipeline(BasePipeline):
         self.logger.info("📥 Step 1: Data Ingestion")
 
         ingestion_config = self.config_manager.get_data_ingestion_config()
-        data_ingestion = DataIngestion(ingestion_config, self.config_manager)
+        data_ingestion = DataIngestion(ingestion_config, self.s3_manager)
         raw_data_path = data_ingestion.run()
 
         self.logger.info(f"✅ Data ingestion completed: {raw_data_path}")
@@ -292,9 +327,7 @@ class DataPipeline(BasePipeline):
         self.logger.info("🔄 Step 2: Data Preprocessing")
 
         preprocessing_config = self.config_manager.get_data_preprocessing_config()
-        data_preprocessing = DataPreprocessing(
-            preprocessing_config, self.config_manager
-        )
+        data_preprocessing = DataPreprocessing(preprocessing_config, self.s3_manager)
         processed_data_path = data_preprocessing.run(self.data_paths["raw_data"])
 
         self.logger.info(f"✅ Data preprocessing completed: {processed_data_path}")
@@ -310,7 +343,7 @@ class DataPipeline(BasePipeline):
         self.logger.info("🔍 Step 3: Data Validation")
 
         validation_config = self.config_manager.get_data_validation_config()
-        data_validation = DataValidation(validation_config, self.config_manager)
+        data_validation = DataValidation(validation_config, self.s3_manager)
         validation_passed, validation_report = data_validation.run(
             self.data_paths["processed_data"]
         )

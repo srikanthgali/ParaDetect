@@ -6,6 +6,7 @@ from ensure import ensure_annotations
 from pathlib import Path
 import logging
 import json
+import numpy as np
 import torch
 from para_detect.constants import DEVICE_PRIORITY
 from para_detect.core.exceptions import DeviceError
@@ -127,3 +128,24 @@ def detect_device(
 
     except Exception as e:
         raise DeviceError(f"Failed to detect device: {str(e)}") from e
+
+
+def convert_to_serializable(obj: Any) -> Any:
+    """Convert numpy types and other non-serializable types to JSON-serializable formats."""
+    if isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return convert_to_serializable(obj.tolist())
+    elif hasattr(obj, "__dict__"):
+        # Handle custom objects
+        return convert_to_serializable(obj.__dict__)
+    else:
+        return obj

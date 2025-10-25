@@ -18,6 +18,7 @@ class DataValidationConfig:
     max_null_percentage: float
     validation_report_dir: Path
     report_filename: str
+    use_s3_cache: bool = False
 
     def __post_init__(self):
         """Validate configuration after initialization"""

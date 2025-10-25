@@ -25,6 +25,8 @@ class PipelineConfig:
     state_auto_save: bool = True
     state_retention_days: int = 30
     enable_pipeline_locks: bool = True
+    use_s3_cache: bool = False
+    s3_backup_enabled: bool = False
 
     def __post_init__(self):
         """Validate configuration after initialization"""

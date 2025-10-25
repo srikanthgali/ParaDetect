@@ -28,19 +28,21 @@ class DataPreprocessing(BaseComponent):
     """
 
     def __init__(
-        self,
-        config: DataPreprocessingConfig,
-        config_manager: ConfigurationManager = None,
+        self, config: DataPreprocessingConfig, s3_manager: Optional[S3Manager] = None
     ):
         """
         Initialize DataPreprocessing component.
 
         Args:
             config: DataPreprocessingConfig object containing preprocessing parameters
-            config_manager: ConfigurationManager for S3 configuration access
+            s3_manager: Optional S3Manager instance for S3 operations
         """
+        # Keep the typed config for component-specific operations
         self.preprocessing_config = config
-        self.config_manager = config_manager or ConfigurationManager()
+
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
 
         # Pass the config as a dictionary to the base class for backward compatibility
         super().__init__(config.__dict__)
@@ -48,31 +50,7 @@ class DataPreprocessing(BaseComponent):
         # Create directories
         self.preprocessing_config.processed_data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize S3 manager
-        self._initialize_s3_manager()
-
         self.logger.info("DataPreprocessing component initialized")
-
-    def _initialize_s3_manager(self):
-        """Initialize S3 manager with automatic credential detection."""
-        try:
-            self.s3_manager = S3Manager(config_manager=self.config_manager)
-            self.s3_enabled = True
-
-            # Create bucket if it doesn't exist
-            self.s3_manager.create_bucket_if_not_exists()
-
-            self.logger.info("S3 integration enabled successfully")
-
-            # Log credential info for debugging
-            cred_info = self.s3_manager.get_credential_info()
-            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
-            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
-
-        except Exception as e:
-            self.s3_manager = None
-            self.s3_enabled = False
-            self.logger.warning(f"S3 integration disabled: {e}")
 
     def run(self, input_data_path: str) -> str:
         """

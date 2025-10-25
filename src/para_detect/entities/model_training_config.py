@@ -90,6 +90,7 @@ class ModelTrainingConfig:
     save_tokenizer: bool = True
     create_model_card: bool = True
     save_training_args: bool = True
+    use_s3_cache: bool = False
 
     # Random seed
     seed: int = 42

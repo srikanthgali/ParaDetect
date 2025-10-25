@@ -16,6 +16,7 @@ data_ingestion:
   dataset_filename: "ai_text_detection_pile.parquet"
   sample_size: null  # For development/testing, use a smaller sample
   random_state: 42
+  use_s3_cache: true  # Enable S3 caching for ingested data
 
 # Data Preprocessing Configuration
 data_preprocessing:
@@ -32,6 +33,7 @@ data_preprocessing:
   processed_data_dir: "data/processed/"
   processed_filename: "ai_text_detection_pile_processed.parquet"
   random_state: 42
+  use_s3_cache: true  # Enable S3 caching for processed data
 
 # Data Validation Configuration
 data_validation:
@@ -46,6 +48,7 @@ data_validation:
   max_null_percentage: 0.05
   validation_report_dir: "artifacts/reports/"
   report_filename: "data_validation_report.json"
+  use_s3_cache: true  # Enable S3 caching for data validation reports
 
 # Pipeline Configuration - State Management
 pipeline:
@@ -61,6 +64,8 @@ pipeline:
   state_auto_save: true
   state_retention_days: 30
   enable_pipeline_locks: true
+  use_s3_cache: true  # Enable S3 caching for all components
+  s3_backup_enabled: true  # Enable S3 backup for training runs
 
 # Inference Configuration
 inference:

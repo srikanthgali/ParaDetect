@@ -8,8 +8,9 @@ import json
 import hashlib
 import traceback
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from dataclasses import replace
 
 from para_detect.core.base_pipeline import BasePipeline
 from para_detect.core.config_manager import ConfigurationManager
@@ -20,6 +21,7 @@ from para_detect.components.model_validation import ModelValidator
 from para_detect.components.model_registration import ModelRegistrar
 from para_detect.core.exceptions import MLPipelineException
 from para_detect.entities.pipeline_config import PipelineType
+from para_detect.utils.s3_manager import S3Manager
 from para_detect import get_logger
 
 
@@ -76,6 +78,9 @@ class TrainingPipeline(BasePipeline):
         # Set up directories and state
         self._setup_directories()
         self.training_artifacts = self._initialize_artifacts()
+
+        # Initialize S3 manager once for entire pipeline
+        self._initialize_s3_manager()
 
         # Initialize components (lazy loading)
         self.data_pipeline = None
@@ -329,6 +334,28 @@ class TrainingPipeline(BasePipeline):
             "last_checkpoint": None,
         }
 
+    def _initialize_s3_manager(self):
+        """Initialize S3 manager for training artifacts backup."""
+        try:
+
+            self.s3_manager = S3Manager(config_manager=self.config_manager)
+            self.s3_enabled = True
+
+            # Create bucket if it doesn't exist
+            self.s3_manager.create_bucket_if_not_exists()
+
+            self.logger.info("S3 integration enabled for training pipeline")
+
+            # Log credential info for debugging
+            cred_info = self.s3_manager.get_credential_info()
+            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
+            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
+
+        except Exception as e:
+            self.s3_manager = None
+            self.s3_enabled = False
+            self.logger.warning(f"S3 integration disabled for training pipeline: {e}")
+
     def run(
         self,
         use_existing_data: bool = False,
@@ -466,11 +493,17 @@ class TrainingPipeline(BasePipeline):
         # Save final artifacts
         self._save_artifacts()
 
+        # Upload complete training run to S3
+        if self.s3_enabled:
+            self._upload_complete_training_run_to_s3()
+
         # Create completion marker
         completion_marker = self.run_dir / "TRAINING_COMPLETE"
         with open(completion_marker, "w") as f:
             f.write(f"Training completed at: {self.training_artifacts['end_time']}\n")
             f.write(f"Run ID: {self.run_id}\n")
+            if self.s3_enabled:
+                f.write("Training artifacts backed up to S3\n")
 
         # Cleanup current run state
         current_run_state = self.checkpoint_dir / "current_run.json"
@@ -479,6 +512,8 @@ class TrainingPipeline(BasePipeline):
 
         self.logger.info("🎉 Training pipeline completed successfully!")
         self.logger.info(f"📁 Artifacts saved to: {self.run_dir}")
+        if self.s3_enabled:
+            self.logger.info("☁️ Complete training run backed up to S3")
 
     def _save_artifacts(self):
         """Save training artifacts."""
@@ -559,7 +594,7 @@ class TrainingPipeline(BasePipeline):
         self.logger.info("📊 Step 1: Data Pipeline")
 
         if self.data_pipeline is None:
-            self.data_pipeline = DataPipeline(self.config_manager)
+            self.data_pipeline = DataPipeline(self.config_manager, self.s3_manager)
 
         data_result = self.data_pipeline.run_full_pipeline()
         self.training_artifacts["processed_data_path"] = data_result[
@@ -602,7 +637,6 @@ class TrainingPipeline(BasePipeline):
 
         # Initialize trainer with simple run-specific output directory
         training_config = self.config_manager.get_model_training_config()
-        from dataclasses import replace
 
         training_config = replace(
             training_config,
@@ -610,7 +644,12 @@ class TrainingPipeline(BasePipeline):
             train_path=data_path,  # Ensure config has the data path
         )
 
-        self.model_trainer = ModelTrainer(training_config)
+        self.model_trainer = ModelTrainer(
+            config=training_config,
+            tokenizer=None,
+            model=None,
+            s3_manager=self.s3_manager,
+        )
 
         # Build model and prepare datasets
         model = self.model_trainer.build_model()
@@ -623,6 +662,10 @@ class TrainingPipeline(BasePipeline):
         self.training_artifacts["model_path"] = model_path
         self.training_artifacts["training_metrics"] = training_result
 
+        # Backup training state and run directory to S3
+        if self.s3_enabled:
+            self._backup_training_run_to_s3()
+
         self.logger.info(f"✅ Model training completed: {model_path}")
 
     def _run_model_evaluation(self):
@@ -631,13 +674,14 @@ class TrainingPipeline(BasePipeline):
 
         # Initialize evaluator
         evaluation_config = self.config_manager.get_model_evaluation_config()
-        from dataclasses import replace
 
         evaluation_config = replace(
             evaluation_config, evaluation_output_dir=self.run_dir / "evaluation"
         )
 
-        self.model_evaluator = ModelEvaluator(evaluation_config)
+        self.model_evaluator = ModelEvaluator(
+            evaluation_config, self.run_id, self.s3_manager
+        )
 
         # Load model and evaluate
         self.model_evaluator.load_model(self.training_artifacts["model_path"])
@@ -665,13 +709,14 @@ class TrainingPipeline(BasePipeline):
 
         # Initialize validator
         validation_config = self.config_manager.get_model_validation_config()
-        from dataclasses import replace
 
         validation_config = replace(
             validation_config, validation_output_dir=self.run_dir / "validation"
         )
 
-        self.model_validator = ModelValidator(validation_config)
+        self.model_validator = ModelValidator(
+            validation_config, self.run_id, self.s3_manager
+        )
 
         # Get predictions from evaluation results
         evaluation_results = self.training_artifacts["evaluation_results"]
@@ -701,11 +746,16 @@ class TrainingPipeline(BasePipeline):
         # Initialize registrar
         registration_config = self.config_manager.get_model_registration_config()
 
+        registration_config = replace(
+            registration_config, registration_output_dir=self.run_dir / "registration"
+        )
         # Override dry_run if set at pipeline level
         if self.dry_run:
             registration_config.dry_run = True
 
-        self.model_registrar = ModelRegistrar(registration_config)
+        self.model_registrar = ModelRegistrar(
+            registration_config, self.run_id, self.s3_manager
+        )
 
         # Log the paths for better visibility
         training_model_path = self.training_artifacts["model_path"]
@@ -716,7 +766,6 @@ class TrainingPipeline(BasePipeline):
 
         # Prepare comprehensive metadata for model card generation
         training_config = self.config_manager.get_model_training_config()
-        evaluation_config = self.config_manager.get_model_evaluation_config()
 
         # Extract actual training results and metrics
         training_metrics = self.training_artifacts.get("training_metrics", {})
@@ -874,6 +923,188 @@ class TrainingPipeline(BasePipeline):
                 "error": str(e),
             }
 
+    def _backup_training_run_to_s3(self) -> bool:
+        """Backup current training run directory to S3 using enhanced S3Manager functionality."""
+        try:
+            if not self.s3_enabled:
+                return False
+
+            self.logger.info(f"Backing up training run to S3: {self.run_id}")
+
+            # Prepare metadata
+            metadata = {
+                "step": "model_training_completed",
+                "config_hash": self._get_config_hash(),
+            }
+
+            # Use S3Manager's enhanced upload method
+            results = self.s3_manager.upload_training_run(
+                run_dir=self.run_dir,
+                run_id=self.run_id,
+                backup_type="partial",
+                metadata=metadata,
+            )
+
+            if results["success"]:
+                self.logger.info(
+                    f"Partially backed up training run to S3: "
+                    f"{results['files_uploaded']} files, {results['directories_created']} empty directories"
+                )
+                return True
+            else:
+                self.logger.warning("Failed to backup training run to S3")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error backing up training run to S3: {e}")
+            return False
+
+    def _upload_complete_training_run_to_s3(self) -> bool:
+        """Upload complete training run to S3."""
+        try:
+            if not self.s3_enabled:
+                return False
+
+            self.logger.info(f"Uploading complete training run to S3: {self.run_id}")
+
+            # Prepare metadata
+            metadata = {
+                "training_successful": str(
+                    self.training_artifacts.get("training_successful", False)
+                ),
+                "config_hash": self._get_config_hash(),
+            }
+
+            # Use S3Manager's enhanced upload method
+            results = self.s3_manager.upload_training_run(
+                run_dir=self.run_dir,
+                run_id=self.run_id,
+                backup_type="complete",
+                metadata=metadata,
+            )
+
+            if results["success"]:
+                self.logger.info(
+                    f"Successfully uploaded complete training run to S3: "
+                    f"{results['files_uploaded']} files, {results['directories_created']} empty directories"
+                )
+
+                # Create a manifest file
+                manifest = {
+                    "run_id": self.run_id,
+                    "upload_results": results,
+                    "training_artifacts": self.training_artifacts,
+                }
+
+                manifest_file = self.run_dir / "s3_upload_manifest.json"
+                with open(manifest_file, "w") as f:
+                    json.dump(manifest, f, indent=2, default=str)
+
+                # Upload manifest separately
+                manifest_s3_key = f"{results['s3_prefix']}/s3_upload_manifest.json"
+                self.s3_manager.upload_file(
+                    str(manifest_file), manifest_s3_key, "artifacts", metadata
+                )
+
+                return True
+            else:
+                self.logger.warning("Failed to upload complete training run to S3")
+                if results["failed_uploads"] > 0:
+                    self.logger.warning(f"Failed uploads: {results['failed_uploads']}")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading complete training run to S3: {e}")
+            return False
+
+    def list_s3_training_runs(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """List complete training runs available in S3."""
+        try:
+            if not self.s3_enabled:
+                return []
+
+            files = self.s3_manager.list_files("training/complete_runs/", "artifacts")
+
+            runs = []
+            seen_runs = set()
+
+            for file_info in files[: limit * 10]:  # Get more files to filter
+                key_parts = file_info["key"].split("/")
+                if len(key_parts) >= 3:
+                    run_id = key_parts[2]
+                    if run_id not in seen_runs and file_info["key"].endswith(
+                        "s3_upload_manifest.json"
+                    ):
+                        runs.append(
+                            {
+                                "run_id": run_id,
+                                "s3_path": f"training/complete_runs/{run_id}",
+                                "manifest_key": file_info["key"],
+                                "size_bytes": file_info["size"],
+                                "last_modified": file_info["last_modified"].isoformat(),
+                            }
+                        )
+                        seen_runs.add(run_id)
+
+                        if len(runs) >= limit:
+                            break
+
+            return runs
+
+        except Exception as e:
+            self.logger.error(f"Failed to list S3 training runs: {e}")
+            return []
+
+    def download_training_run_from_s3(
+        self, run_id: str, local_path: Optional[str] = None
+    ) -> Optional[str]:
+        """Download a complete training run from S3 using enhanced S3Manager functionality."""
+        try:
+            if not self.s3_enabled:
+                return None
+
+            # Download to specified location or default
+            local_path = local_path or str(self.checkpoint_dir / f"downloaded_{run_id}")
+            local_dir = Path(local_path)
+
+            # Check if the run exists
+            s3_prefix = f"training/complete_runs/{run_id}"
+            manifest_key = f"artifacts/{s3_prefix}/s3_upload_manifest.json"
+
+            if not self.s3_manager.file_exists(manifest_key, folder_type=None):
+                self.logger.warning(f"Training run {run_id} not found in S3")
+                return None
+
+            self.logger.info(
+                f"Downloading training run {run_id} from S3 to {local_path}"
+            )
+
+            # Use S3Manager's enhanced download method
+            results = self.s3_manager.download_directory_with_structure(
+                s3_prefix=s3_prefix,
+                local_dir=local_dir,
+                folder_type="artifacts",
+                clean_placeholders=True,
+            )
+
+            if results["success"]:
+                self.logger.info(
+                    f"Successfully downloaded training run {run_id} from S3: "
+                    f"{results['files_downloaded']} files, {results['directories_created']} directories"
+                )
+                return str(local_dir)
+            else:
+                self.logger.warning(f"Failed to download training run {run_id} from S3")
+                if results["failed_downloads"] > 0:
+                    self.logger.warning(
+                        f"Failed downloads: {results['failed_downloads']}"
+                    )
+                return None
+
+        except Exception as e:
+            self.logger.error(f"Error downloading training run from S3: {e}")
+            return None
+
     def get_training_status(self) -> Dict[str, Any]:
         """Get current training pipeline status."""
         return {
@@ -882,6 +1113,10 @@ class TrainingPipeline(BasePipeline):
             "is_complete": self.pipeline_state.get("training_successful", False),
             "artifacts_dir": str(self.run_dir),
             "resume_info": self.resume_info,
+            "s3_integration": {
+                "enabled": self.s3_enabled,
+                "backup_available": self.s3_enabled,
+            },
         }
 
 

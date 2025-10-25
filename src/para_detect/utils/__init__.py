@@ -9,4 +9,5 @@ __all__ = [
     "save_json",
     "load_json",
     "setup_debugger",
+    "convert_to_serializable",
 ]

@@ -5,9 +5,9 @@ Handles DeBERTa fine-tuning with LoRA support, checkpointing, and resumption
 
 import os
 import json
-import shutil
 import torch
 import numpy as np
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Union
 from datetime import datetime
@@ -29,16 +29,11 @@ import hashlib
 
 from para_detect.entities.model_training_config import ModelTrainingConfig
 from para_detect.core.exceptions import ModelTrainingError, DeviceError, CheckpointError
-from para_detect.constants import (
-    DEFAULT_LORA_TARGET_MODULES,
-    MODELS_DIR,
-    CHECKPOINTS_DIR,
-    DEVICE_PRIORITY,
-    DEFAULT_RANDOM_STATE,
-)
+from para_detect.constants import DEFAULT_LORA_TARGET_MODULES
 from para_detect.utils.helpers import create_directories, detect_device
 from para_detect import get_logger
 from para_detect.constants import LABEL_MAPPING, REVERSE_LABEL_MAPPING
+from para_detect.utils.s3_manager import S3Manager
 
 
 class ModelTrainer:
@@ -56,6 +51,7 @@ class ModelTrainer:
         config: ModelTrainingConfig,
         tokenizer: Optional[AutoTokenizer] = None,
         model: Optional[AutoModelForSequenceClassification] = None,
+        s3_manager: Optional[S3Manager] = None,
     ):
         """
         Initialize model trainer.
@@ -64,6 +60,7 @@ class ModelTrainer:
             config: Training configuration
             tokenizer: Pre-loaded tokenizer (optional)
             model: Pre-loaded model (optional)
+            s3_manager: S3 manager for handling S3 operations (optional)
         """
         self.config = config
         self.logger = get_logger(self.__class__.__name__)
@@ -78,6 +75,13 @@ class ModelTrainer:
         # Model and tokenizer
         self.tokenizer = tokenizer
         self.model = model
+
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
+
+        if not self.s3_enabled:
+            self.logger.info("S3 integration disabled - no S3Manager provided")
 
         # Training state
         self.training_state = {
@@ -103,23 +107,27 @@ class ModelTrainer:
     def _get_shared_tokenized_cache_dir(self) -> Path:
         """Get shared cache directory for tokenized datasets."""
         # Create hash based on model and tokenization config
-        cache_key_elements = {
+        config_hash = self._get_config_hash()
+
+        # Shared cache under artifacts
+        cache_dir = Path("artifacts/tokenized_datasets") / f"cache_{config_hash}"
+        return cache_dir
+
+    def _get_config_hash(self) -> str:
+        """Generate a hash representing the current tokenization configuration."""
+        config_elements = {
             "model_name": self.config.model_name_or_path,
             "max_length": self.config.max_length,
             "text_column": self.config.text_column,
             "label_column": self.config.label_column,
         }
-
-        cache_key = json.dumps(cache_key_elements, sort_keys=True)
-        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:12]
-
-        # Shared cache under artifacts
-        cache_dir = Path("artifacts/tokenized_datasets") / f"cache_{cache_hash}"
-        return cache_dir
+        config_string = json.dumps(config_elements, sort_keys=True)
+        config_hash = hashlib.md5(config_string.encode()).hexdigest()
+        return config_hash
 
     def prepare_datasets(self, data_path: Optional[str] = None) -> DatasetDict:
         """
-        Load and tokenize datasets with caching support.
+        Load and tokenize datasets with S3 caching support.
 
         Args:
             data_path: Path to training data (Parquet or dataset directory)
@@ -130,7 +138,16 @@ class ModelTrainer:
         try:
             self.logger.info("📊 Preparing datasets...")
 
-            # Check shared tokenized cache
+            # Check S3 cache first
+            cached_datasets = None
+            if self.s3_enabled and self._should_use_s3_cache():
+                cached_datasets = self._try_download_tokenized_from_s3_cache()
+
+            if cached_datasets:
+                self.logger.info("♻️ Using cached tokenized datasets from S3")
+                return cached_datasets
+
+            # Check local shared tokenized cache
             cached_train_path = self.tokenized_data_cache_dir / "train"
             cached_val_path = self.tokenized_data_cache_dir / "validation"
             cached_test_path = self.tokenized_data_cache_dir / "test"
@@ -141,16 +158,23 @@ class ModelTrainer:
                 and cached_test_path.exists()
                 and not self._should_retokenize(data_path)
             ):
-                self.logger.info("♻️ Reusing cached tokenized datasets")
+                self.logger.info("♻️ Reusing local cached tokenized datasets")
                 train_dataset = load_from_disk(str(cached_train_path))
                 val_dataset = load_from_disk(str(cached_val_path))
                 test_dataset = load_from_disk(str(cached_test_path))
                 self.training_state["tokenization_completed"] = True
-                return DatasetDict(
+
+                datasets = DatasetDict(
                     train=train_dataset,
                     validation=val_dataset,
                     test=test_dataset,
                 )
+
+                # Upload to S3 cache for future use
+                if self.s3_enabled:
+                    self._upload_tokenized_datasets_to_s3(datasets, data_path)
+
+                return datasets
 
             # Load raw data
             data_path = data_path or self.config.train_path
@@ -194,20 +218,17 @@ class ModelTrainer:
             train_texts, temp_texts, train_labels, temp_labels = train_test_split(
                 df[self.config.text_column].tolist(),
                 df[self.config.label_column].tolist(),
-                test_size=self.config.validation_split
-                + self.config.test_split,  # Ex: 30% for validation + test
+                test_size=self.config.validation_split + self.config.test_split,
                 random_state=self.config.seed,
                 stratify=df[self.config.label_column].tolist(),
             )
 
-            # Split the remaining 30% into validation (15%) and test (15%)
+            # Split the remaining portion into validation and test
             val_texts, test_texts, val_labels, test_labels = train_test_split(
                 temp_texts,
                 temp_labels,
                 test_size=self.config.test_split
-                / (
-                    self.config.validation_split + self.config.test_split
-                ),  # Half of 30% = 15% each
+                / (self.config.validation_split + self.config.test_split),
                 random_state=self.config.seed,
                 stratify=temp_labels,
             )
@@ -275,7 +296,7 @@ class ModelTrainer:
                     self.logger.warning(
                         "Tokenization encountered a multiprocessing crash; retrying strictly in main process."
                     )
-                    # Retry with explicit no multiprocessing flags (datasets defaults to no MP when num_proc is None)
+                    # Retry with explicit no multiprocessing flags
                     train_dataset = train_dataset.map(
                         self._tokenize_function,
                         batched=True,
@@ -316,15 +337,20 @@ class ModelTrainer:
             with open(test_data_path, "w") as f:
                 f.write(str(cached_test_path))
 
-            self.training_state["tokenization_completed"] = True
-
-            return DatasetDict(
+            datasets = DatasetDict(
                 {
                     "train": train_dataset,
                     "validation": val_dataset,
                     "test": test_dataset,
                 }
             )
+
+            # Upload tokenized datasets to S3 cache
+            if self.s3_enabled:
+                self._upload_tokenized_datasets_to_s3(datasets, data_path)
+
+            self.training_state["tokenization_completed"] = True
+            return datasets
 
         except Exception as e:
             raise ModelTrainingError(f"Failed to prepare datasets: {str(e)}") from e
@@ -344,7 +370,6 @@ class ModelTrainer:
 
     def _should_retokenize(self, data_path: Optional[str] = None) -> bool:
         """Check if datasets should be retokenized."""
-
         meta_path = self.tokenized_data_cache_dir / "tokenization_metadata.json"
 
         if not meta_path.exists():
@@ -365,10 +390,6 @@ class ModelTrainer:
             return True
         if meta.get("label_column") != self.config.label_column:
             return True
-
-        # If no specific data_path was provided, use config
-        current_data_path = str(data_path or self.config.train_path or "")
-        saved_data_path = str(meta.get("data_path") or "")
 
         # Data path checks
         current_data_path = str(data_path or self.config.train_path or "")
@@ -764,6 +785,211 @@ class ModelTrainer:
         except Exception as e:
             self.logger.warning(f"Error finding checkpoint: {str(e)}")
             return None
+
+    def _get_s3_tokenized_cache_key(self) -> str:
+        """
+        Generate S3 cache key for tokenized datasets.
+        Returns:
+            str: S3 cache key
+        """
+        # Create hash based on tokenization config
+        config_hash = self._get_config_hash()
+        return f"artifacts/tokenized_datasets/cache_{config_hash}"
+
+    def _should_use_s3_cache(self) -> bool:
+        """Determine if S3 cache should be checked for tokenized datasets."""
+        return getattr(self.config, "use_s3_cache", True)
+
+    def _try_download_tokenized_from_s3_cache(self) -> Optional[DatasetDict]:
+        """Try to download tokenized datasets from S3 cache."""
+        try:
+            if not self.s3_enabled:
+                return None
+
+            cache_key = self._get_s3_tokenized_cache_key()
+            self.logger.info(f"Checking S3 cache for tokenized datasets: {cache_key}")
+
+            # Check if all dataset parts exist in S3
+            train_key = f"{cache_key}/train"
+            val_key = f"{cache_key}/validation"
+            test_key = f"{cache_key}/test"
+            meta_key = f"{cache_key}/tokenization_metadata.json"
+
+            if not all(
+                [
+                    self.s3_manager.file_exists(
+                        f"{train_key}/dataset_info.json", "artifacts"
+                    ),
+                    self.s3_manager.file_exists(
+                        f"{val_key}/dataset_info.json", "artifacts"
+                    ),
+                    self.s3_manager.file_exists(
+                        f"{test_key}/dataset_info.json", "artifacts"
+                    ),
+                    self.s3_manager.file_exists(meta_key, "artifacts"),
+                ]
+            ):
+                self.logger.info("No complete cached tokenized datasets found in S3")
+                return None
+
+            # Download datasets to local cache
+            local_cache_dir = self.tokenized_data_cache_dir
+            local_cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # Download each dataset part
+            success_count = 0
+            for dataset_name, s3_key in [
+                ("train", train_key),
+                ("validation", val_key),
+                ("test", test_key),
+            ]:
+                local_dataset_dir = local_cache_dir / dataset_name
+                if self._download_dataset_from_s3(s3_key, local_dataset_dir):
+                    success_count += 1
+
+            # Download metadata
+            meta_local_path = local_cache_dir / "tokenization_metadata.json"
+            if self.s3_manager.download_file(meta_key, meta_local_path, "artifacts"):
+                success_count += 1
+
+            if success_count == 4:  # All downloads successful
+                # Load datasets
+                train_dataset = load_from_disk(str(local_cache_dir / "train"))
+                val_dataset = load_from_disk(str(local_cache_dir / "validation"))
+                test_dataset = load_from_disk(str(local_cache_dir / "test"))
+
+                self.logger.info(
+                    "Successfully downloaded and loaded tokenized datasets from S3"
+                )
+                return DatasetDict(
+                    train=train_dataset,
+                    validation=val_dataset,
+                    test=test_dataset,
+                )
+            else:
+                self.logger.warning(
+                    "Failed to download complete tokenized datasets from S3"
+                )
+                return None
+
+        except Exception as e:
+            self.logger.warning(f"Error downloading tokenized datasets from S3: {e}")
+            return None
+
+    def _download_dataset_from_s3(self, s3_key: str, local_dir: Path) -> bool:
+        """Download a single dataset from S3."""
+        try:
+            if not self.s3_enabled:
+                return False
+
+            # List files in the dataset directory
+            files = self.s3_manager.list_files(s3_key, "artifacts")
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            success_count = 0
+            for file_info in files:
+                file_key = file_info["key"]
+                file_name = Path(file_key).name
+                local_file_path = local_dir / file_name
+
+                if self.s3_manager.download_file(
+                    file_key, local_file_path, "artifacts"
+                ):
+                    success_count += 1
+
+            return success_count > 0
+
+        except Exception as e:
+            self.logger.warning(f"Error downloading dataset {s3_key} from S3: {e}")
+            return False
+
+    def _upload_tokenized_datasets_to_s3(
+        self, datasets: DatasetDict, data_path: Optional[str] = None
+    ) -> bool:
+        """Upload tokenized datasets to S3 cache."""
+        try:
+            if not self.s3_enabled:
+                return False
+
+            cache_key = self._get_s3_tokenized_cache_key()
+            self.logger.info(f"Uploading tokenized datasets to S3: {cache_key}")
+
+            # Metadata for S3 objects
+            metadata = {
+                "component": "model_training_tokenization",
+                "model_name": self.config.model_name_or_path,
+                "max_length": str(self.config.max_length),
+                "data_source": str(data_path or self.config.train_path or ""),
+                "tokenized_at": datetime.now().isoformat(),
+            }
+
+            success_count = 0
+
+            # Upload each dataset
+            for dataset_name, dataset in datasets.items():
+                local_dataset_dir = self.tokenized_data_cache_dir / dataset_name
+                s3_dataset_key = f"{cache_key}/{dataset_name}"
+
+                if self._upload_dataset_to_s3(
+                    local_dataset_dir, s3_dataset_key, metadata
+                ):
+                    success_count += 1
+
+            # Upload metadata
+            meta_local_path = (
+                self.tokenized_data_cache_dir / "tokenization_metadata.json"
+            )
+            meta_s3_key = f"{cache_key}/tokenization_metadata.json"
+            if meta_local_path.exists() and self.s3_manager.upload_file(
+                str(meta_local_path), meta_s3_key, "artifacts", metadata
+            ):
+                success_count += 1
+
+            if success_count == 4:  # All uploads successful
+                self.logger.info("Successfully uploaded tokenized datasets to S3")
+                return True
+            else:
+                self.logger.warning(
+                    "Failed to upload complete tokenized datasets to S3"
+                )
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading tokenized datasets to S3: {e}")
+            return False
+
+    def _upload_dataset_to_s3(
+        self, local_dir: Path, s3_key: str, metadata: dict
+    ) -> bool:
+        """Upload a single dataset directory to S3 using enhanced functionality."""
+        try:
+            if not local_dir.exists() or not self.s3_enabled:
+                return False
+
+            self.logger.debug(f"Uploading dataset to S3: {s3_key}")
+
+            # Use S3Manager's enhanced directory upload
+            results = self.s3_manager.upload_directory_with_structure(
+                local_dir=local_dir,
+                s3_prefix=s3_key,
+                folder_type="artifacts",
+                exclude_patterns=[".git", "__pycache__", "*.pyc"],
+                preserve_empty_dirs=True,
+                metadata=metadata,
+            )
+
+            if results["success"]:
+                self.logger.debug(
+                    f"Uploaded dataset {s3_key}: {results['files_uploaded']} files"
+                )
+                return True
+            else:
+                self.logger.warning(f"Failed to upload dataset {s3_key}")
+                return False
+
+        except Exception as e:
+            self.logger.warning(f"Error uploading dataset {s3_key} to S3: {e}")
+            return False
 
     def save(self) -> str:
         """

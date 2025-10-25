@@ -26,19 +26,21 @@ class DataIngestion(BaseComponent):
     """
 
     def __init__(
-        self, config: DataIngestionConfig, config_manager: ConfigurationManager
+        self, config: DataIngestionConfig, s3_manager: Optional[S3Manager] = None
     ):
         """
         Initialize DataIngestion component.
 
         Args:
             config: DataIngestionConfig entity object containing ingestion parameters
+            s3_manager: Optional S3Manager instance for S3 operations
         """
         # Keep the typed config for component-specific operations
         self.ingestion_config = config
 
-        # Keep config manager for S3 config access
-        self.config_manager = config_manager
+        # Keep S3 manager for S3 operations
+        self.s3_manager = s3_manager
+        self.s3_enabled = s3_manager is not None
 
         # Pass the config as a dictionary to the base class for backward compatibility
         # The base class will convert it to ConfigBox
@@ -47,37 +49,9 @@ class DataIngestion(BaseComponent):
         # Create directories
         self.ingestion_config.raw_data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize S3 manager
-        self._initialize_s3_manager()
-
         self.logger.info(
             f"DataIngestion component initialized with source: {config.source_type}"
         )
-
-    def _initialize_s3_manager(self):
-        """Initialize S3 manager with automatic credential detection."""
-        try:
-            # Simple initialization - no profile needed
-            self.s3_manager = S3Manager(config_manager=self.config_manager)
-            self.s3_enabled = True
-
-            # Create bucket if it doesn't exist
-            self.s3_manager.create_bucket_if_not_exists()
-
-            self.logger.info("S3 integration enabled successfully")
-
-            # Log credential info for debugging
-            cred_info = self.s3_manager.get_credential_info()
-            self.logger.info(f"AWS Account: {cred_info.get('account', 'Unknown')}")
-            self.logger.info(f"Environment: {cred_info.get('environment', 'Unknown')}")
-            self.logger.info(
-                f"Credential Source: {cred_info.get('credential_source', 'Unknown')}"
-            )
-
-        except Exception as e:
-            self.s3_manager = None
-            self.s3_enabled = False
-            self.logger.warning(f"S3 integration disabled: {e}")
 
     def validate_config(self) -> bool:
         """
